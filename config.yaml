@@ -1,0 +1,32 @@
+# WPU Client Configuration
+
+log_level: "INFO"
+
+services:
+  slideshow:
+    enabled: true
+    full_screen: true
+    advance_time: 2
+    image_directory: "stock_images"
+    image_extensions:
+      - "*.png"
+      - "*.jpg"
+      - "*.jpeg"
+      - "*.gif"
+      - "*.bmp"
+      - "*.webp"
+    background_color: "black"
+    scale_mode: "fill"  # fill, fit, crop
+    sort_mode: "numeric"  # numeric, alphabetical
+
+  face_recognition:
+    enabled: true
+    camera_id: 0
+    n: 4
+    api_endpoint: "http://10.2.130.161:8000/api/v1/identify/"
+    wpu_endpoint: "http://10.2.130.161:8000/api/v1/wpu/images"
+    detection_interval: 1  # seconds between captures
+    min_face_size: 100  # minimum face size in pixels
+    display_result: true  # show result on screen overlay
+    overlay_hide_delay: 3  # seconds to hide overlay
+    person_timeout: 10  # seconds without face before person is considered left

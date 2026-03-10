@@ -1,0 +1,18 @@
+[project]
+name = "wpu-client"
+version = "0.1.0"
+description = "WPU Client - Face recognition slideshow with multiple services"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pygobject==3.42.2",
+    "pyyaml",
+    "face_recognition",
+    "opencv-python",
+    "numpy",
+    "httpx",
+    "pydantic",
+    "setuptools==80.10.2",
+    "scipy",
+    "picamera2",
+]
