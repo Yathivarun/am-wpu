@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import os
 import signal
 import sys
 
@@ -12,11 +13,20 @@ from wpu_client.core.service_base import ServiceBase
 from wpu_client.services.face_recognition.face_service import FaceRecognitionService
 from wpu_client.services.slideshow.slideshow_service import SlideshowService
 
-# Configure logging
+# Ensure log directory exists
+LOG_DIR = "/var/log/wpu-client"
+LOG_FILE = os.path.join(LOG_DIR, "app.log")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# Configure logging — stdout + file for Alloy to tail
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_FILE),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -114,6 +124,15 @@ def main():
 
     # Create services based on arguments
     services = []
+    face_recognition_service = None
+
+    if args.service in ("face-recognition", "all"):
+        if settings.services.face_recognition.enabled:
+            face_recognition_service = FaceRecognitionService(settings.services.face_recognition, event_bus)
+            services.append(face_recognition_service)
+            logger.info("Face recognition service added")
+        else:
+            logger.warning("Face recognition service is disabled in configuration")
 
     if args.service in ("slideshow", "all"):
         if settings.services.slideshow.enabled:
@@ -121,21 +140,13 @@ def main():
                 SlideshowService(
                     settings.services.slideshow,
                     event_bus,
-                    settings.services.face_recognition.wpu_endpoint
+                    settings.services.face_recognition.wpu_endpoint,
+                    face_recognition_service,  # pass for camera preview
                 )
             )
             logger.info("Slideshow service added")
         else:
             logger.warning("Slideshow service is disabled in configuration")
-
-    if args.service in ("face-recognition", "all"):
-        if settings.services.face_recognition.enabled:
-            services.append(
-                FaceRecognitionService(settings.services.face_recognition, event_bus)
-            )
-            logger.info("Face recognition service added")
-        else:
-            logger.warning("Face recognition service is disabled in configuration")
 
     if not services:
         logger.error("No services enabled. Exiting.")

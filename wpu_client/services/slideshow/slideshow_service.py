@@ -7,6 +7,7 @@ import threading
 import time
 from typing import Optional
 
+import numpy as np
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -30,7 +31,7 @@ class SlideshowService(ServiceBase):
     - Visitor images mode: Slideshow of visitor-specific WPU images
     """
 
-    def __init__(self, config: SlideshowConfig, event_bus: EventBus, wpu_endpoint: str):
+    def __init__(self, config: SlideshowConfig, event_bus: EventBus, wpu_endpoint: str, face_service=None):
         """
         Initialize the slideshow service.
 
@@ -38,11 +39,13 @@ class SlideshowService(ServiceBase):
             config: Slideshow configuration
             event_bus: Event bus for inter-service communication
             wpu_endpoint: WPU API endpoint for fetching visitor images
+            face_service: Optional FaceRecognitionService for camera preview
         """
         super().__init__("slideshow")
         self.config = config
         self.event_bus = event_bus
         self.wpu_endpoint = wpu_endpoint
+        self.face_service = face_service  # used for bottom-left camera preview
         self._app: Optional[SlideshowApp] = None
         self._overlay_text: Optional[str] = None
         self._overlay_hide_time: float = 0
@@ -74,7 +77,7 @@ class SlideshowService(ServiceBase):
         self._http_client = HTTPClient(timeout=10.0, max_retries=3)
 
         # Run GTK app in main thread
-        self._app = SlideshowApp(self.config, self, self.wpu_endpoint, self._http_client)
+        self._app = SlideshowApp(self.config, self, self.wpu_endpoint, self._http_client, self.face_service)
         self._app.run(None)
 
     def stop(self) -> None:
@@ -182,6 +185,16 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         self.overlay_label.set_margin_start(20)
         self.overlay_label.set_margin_top(20)
 
+        # --- Camera preview (bottom-left) ---
+        self.camera_preview = Gtk.Picture()
+        self.camera_preview.set_halign(Gtk.Align.START)
+        self.camera_preview.set_valign(Gtk.Align.END)
+        self.camera_preview.set_margin_start(16)
+        self.camera_preview.set_margin_bottom(16)
+        self.camera_preview.set_size_request(320, 240)
+        self.camera_preview.set_content_fit(Gtk.ContentFit.CONTAIN)
+        self.camera_preview.set_visible(False)  # hidden until first frame arrives
+
         # Apply CSS for styling
         provider = Gtk.CssProvider()
         css = f"""
@@ -195,17 +208,24 @@ class SlideshowWindow(Gtk.ApplicationWindow):
             border-radius: 5px;
             font-size: 18px;
         }}
+        picture.camera-preview {{
+            border: 2px solid rgba(255, 255, 255, 0.6);
+            border-radius: 6px;
+            background-color: rgba(0, 0, 0, 0.5);
+        }}
         """.encode()
         provider.load_from_data(css)
         display = self.get_display()
         Gtk.StyleContext.add_provider_for_display(
             display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
+        self.camera_preview.add_css_class("camera-preview")
 
         # Use GtkOverlay for overlay positioning
         overlay = Gtk.Overlay()
         overlay.set_child(self.picture)
         overlay.add_overlay(self.overlay_label)
+        overlay.add_overlay(self.camera_preview)
 
         self.main_box.append(overlay)
         self.set_child(self.main_box)
@@ -224,6 +244,9 @@ class SlideshowWindow(Gtk.ApplicationWindow):
 
         # Start overlay update timer
         self.overlay_timeout_id = GLib.timeout_add(100, self.update_overlay)
+
+        # Start camera preview update timer — 100ms refresh (~10fps, looks live)
+        self.preview_timeout_id = GLib.timeout_add(100, self.update_camera_preview)
 
     def set_images(self, new_images: list[str], mode: str):
         """
@@ -303,6 +326,36 @@ class SlideshowWindow(Gtk.ApplicationWindow):
             self.overlay_label.set_visible(False)
         return True  # Keep timer running
 
+    def update_camera_preview(self):
+        """Refresh the bottom-left camera preview from the latest captured frame."""
+        face_service = getattr(self.service, "face_service", None)
+        if face_service is None:
+            return True  # No face service wired up — skip silently
+
+        frame = face_service.get_preview_frame()
+        if frame is None:
+            return True  # No frame yet
+
+        try:
+            # frame is RGB uint8 numpy array (H, W, 3)
+            h, w = frame.shape[:2]
+            rowstride = w * 3
+            pixbuf = GdkPixbuf.Pixbuf.new_from_data(
+                frame.tobytes(),
+                GdkPixbuf.Colorspace.RGB,
+                False,   # has_alpha
+                8,       # bits_per_sample
+                w, h,
+                rowstride,
+            )
+            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+            self.camera_preview.set_paintable(texture)
+            self.camera_preview.set_visible(True)
+        except Exception as e:
+            logger.debug(f"Camera preview update failed: {e}")
+
+        return True  # Keep timer running
+
     def on_key_pressed(self, controller, keyval, keycode, state):
         """Handle key press events."""
         if keyval == Gdk.KEY_Escape:
@@ -331,12 +384,13 @@ class SlideshowApp(Gtk.Application):
     Manages switching between stock and visitor image modes.
     """
 
-    def __init__(self, config, service, wpu_endpoint, http_client):
+    def __init__(self, config, service, wpu_endpoint, http_client, face_service=None):
         super().__init__(application_id="com.wpu_client.slideshow")
         self.config = config
         self.service = service
         self.wpu_endpoint = wpu_endpoint
         self.http_client = http_client
+        self.face_service = face_service
         self.stock_images = self._load_stock_images()
         self.visitor_images: list[str] = []
         self.current_window: Optional[SlideshowWindow] = None
@@ -426,6 +480,9 @@ class SlideshowApp(Gtk.Application):
         if not self.stock_images:
             logger.error("No stock images to display")
             return
+
+        # Make face_service accessible to SlideshowWindow via the service reference
+        self.service.face_service = self.face_service
 
         self.current_window = SlideshowWindow(
             self,

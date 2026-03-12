@@ -23,10 +23,10 @@ services:
     enabled: true
     camera_id: 0
     n: 4
-    api_endpoint: "http://10.2.130.161:8000/api/v1/identify/"
-    wpu_endpoint: "http://10.2.130.161:8000/api/v1/wpu/images"
+    api_endpoint: "http://192.168.1.11:8000/api/v1/identify/"
+    wpu_endpoint: "http://192.168.1.11:8000/api/v1/wpu/images"
     detection_interval: 1  # seconds between captures
     min_face_size: 100  # minimum face size in pixels
     display_result: true  # show result on screen overlay
     overlay_hide_delay: 3  # seconds to hide overlay
-    person_timeout: 10  # seconds without face before person is considered left
+    person_timeout: 3  # seconds without face before person is considered left

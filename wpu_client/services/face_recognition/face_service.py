@@ -88,13 +88,13 @@ class FaceRecognitionService(ServiceBase):
         # Initialize camera using Picamera2
         try:
             self._camera = Picamera2()
-            # Configure camera for face recognition
+            # Main stream: full-res RGB for face recognition
             config = self._camera.create_preview_configuration(
-                main={"size": (640, 480), "format": "RGB888"}
+                main={"size": (640, 480), "format": "RGB888"},
             )
             self._camera.configure(config)
             self._camera.start()
-            logger.info("Picamera2 started successfully")
+            logger.info("Picamera2 started successfully (640×480 RGB888)")
         except Exception as e:
             logger.error(f"Failed to start Picamera2: {e}")
             self._running = False
@@ -127,6 +127,21 @@ class FaceRecognitionService(ServiceBase):
             self._http_client = None
 
         logger.info("Face recognition service stopped")
+
+    def get_preview_frame(self) -> Optional[np.ndarray]:
+        """
+        Return a live RGB frame from the main camera stream.
+        Picamera2 returns BGR byte order despite RGB888 config — converted here.
+        Returns None if camera is not ready.
+        """
+        if not self._camera or not self._running:
+            return None
+        try:
+            bgr = self._camera.capture_array("main")
+            return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        except Exception as e:
+            logger.debug(f"Live preview capture failed: {e}")
+            return None
 
     def _recognition_loop(self) -> None:
         """Main recognition loop - runs in background thread."""
