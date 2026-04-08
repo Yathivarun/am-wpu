@@ -28,7 +28,7 @@ class FaceRecognitionConfig(BaseModel):
 
     enabled: bool = True
     camera_id: int = 0
-    n: int = 4
+    n: int = 3
     api_endpoint: str = "http://localhost:8000/api/v1/identify/"
     wpu_endpoint: str = "http://localhost:8000/api/v1/wpu/images"
     detection_interval: int = 5  # seconds between captures

@@ -1,10 +1,16 @@
 """Face recognition service - captures, recognizes, and identifies faces."""
 
+import csv
 import logging
 import os
 import threading
 import time
 from typing import Optional
+
+# Dataset directory (relative to project root — three levels up from this file)
+DATASET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "dataset")
+DATASET_MAX_BYTES = 30 * 1024 * 1024 * 1024  # 30 GB hard cap
+DATASET_MAX_FRAMES_PER_VISIT = 50             # max frames saved per visit
 
 import cv2
 import face_recognition
@@ -58,6 +64,14 @@ class FaceRecognitionService(ServiceBase):
         # Similarity threshold for local matching (lower = more strict)
         # Cosine distance: 0 = identical, 1 = completely different
         self._similarity_threshold = 0.4
+
+        # Dataset / visit-log setup
+        os.makedirs(DATASET_DIR, exist_ok=True)
+        self._visit_log_path = os.path.join(DATASET_DIR, "visit_log.csv")
+        self._init_visit_log()
+        self._visit_start_time: Optional[float] = None
+        self._visit_confidence: float = 0.0
+        self._visit_frame_count: int = 0
 
         # Debug frame saving
         self._frame_save_counter = 0
@@ -138,7 +152,8 @@ class FaceRecognitionService(ServiceBase):
             return None
         try:
             bgr = self._camera.capture_array("main")
-            return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            return cv2.flip(rgb, 1)
         except Exception as e:
             logger.debug(f"Live preview capture failed: {e}")
             return None
@@ -175,7 +190,7 @@ class FaceRecognitionService(ServiceBase):
 
         # Capture frame from Picamera2 (already in RGB format)
         try:
-            frame = self._camera.capture_array()
+            frame = self._camera.capture_array("main")
         except Exception as e:
             logger.warning(f"Failed to capture frame: {e}")
             return
@@ -183,8 +198,9 @@ class FaceRecognitionService(ServiceBase):
         logger.info(f"Frame captured: {frame.shape[1]}x{frame.shape[0]} pixels, dtype={frame.dtype}, "
                    f"range=[{frame.min():.1f}, {frame.max():.1f}], detecting faces...")
 
-        # Frame is already RGB from Picamera2 configuration
-        rgb_frame = frame
+        # frame is BGR from capture_array("main") — convert to RGB for face_recognition
+        bgr_frame = frame
+        rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
 
         # Detect faces with timing
         logger.debug("Running HOG face detection model...")
@@ -243,15 +259,16 @@ class FaceRecognitionService(ServiceBase):
         face_vector = face_encodings[0].tolist()
         logger.info(f"Face encoded successfully (128D vector, first 3 values: [{face_vector[0]:.4f}, {face_vector[1]:.4f}, {face_vector[2]:.4f}])")
 
-        # Process the face vector
-        self._process_face_vector(face_vector)
+        # Process the face vector — pass bgr_frame so imwrite saves correct colours
+        self._process_face_vector(face_vector, bgr_frame)
 
-    def _process_face_vector(self, face_vector: list[float]) -> None:
+    def _process_face_vector(self, face_vector: list[float], frame: np.ndarray) -> None:
         """
         Process face vector - either match locally or send to API for identification.
 
         Args:
             face_vector: 128D face embedding vector as list of floats
+            frame: RGB frame from camera — saved to dataset after we have name + confidence
         """
         with self._person_lock:
             now = time.time()
@@ -266,7 +283,10 @@ class FaceRecognitionService(ServiceBase):
                 if similarity < self._similarity_threshold:
                     # Same person - update last seen time
                     self._last_face_seen = now
+                    confidence = (1.0 - similarity) * 100
                     logger.info(f"Same person: {self._current_person_name} (similarity: {similarity:.4f})")
+                    # Save frame now — we have name and real confidence
+                    self._save_dataset_frame(frame, confidence=confidence, distance=similarity)
                     return
                 else:
                     # Different person - need to identify them
@@ -275,7 +295,7 @@ class FaceRecognitionService(ServiceBase):
                 logger.info("No cached face vector - sending to API for identification...")
 
             # No cached face or different person - send to API for identification
-            self._send_identification_request(face_vector)
+            self._send_identification_request(face_vector, frame)
 
     def _compute_face_similarity(self, face_vector1: list[float], face_vector2: list[float]) -> float:
         """
@@ -294,12 +314,13 @@ class FaceRecognitionService(ServiceBase):
             logger.error(f"Error computing face similarity: {e}")
             return 1.0  # Return max distance if computation fails
 
-    def _send_identification_request(self, face_vector: list[float]) -> None:
+    def _send_identification_request(self, face_vector: list[float], frame: np.ndarray) -> None:
         """
         Send face identification request to API.
 
         Args:
             face_vector: 128D face embedding vector as list of floats
+            frame: RGB frame — saved to dataset after we receive name + confidence from API
         """
         if not self._http_client:
             logger.warning("HTTP client not available")
@@ -344,6 +365,9 @@ class FaceRecognitionService(ServiceBase):
 
             # Update person tracking and emit events
             self._update_person_tracking(response.visit_id, face_vector, response.name, confidence)
+
+            # Save frame — we now have person name and real confidence from API
+            self._save_dataset_frame(frame, confidence=confidence, distance=response.distance or 0.0)
 
             # Publish face.recognized event for overlay display
             if self.config.display_result and response.success:
@@ -415,7 +439,10 @@ class FaceRecognitionService(ServiceBase):
                 self._emit_person_left_event()
 
     def _emit_person_detected_event(self, visit_id: str, person_name: str, confidence: float) -> None:
-        """Emit person.detected event."""
+        """Emit person.detected event and start visit tracking."""
+        self._visit_start_time = time.time()
+        self._visit_confidence = confidence
+        self._visit_frame_count = 0
         event = Event(
             event_type="person.detected",
             data={
@@ -428,9 +455,16 @@ class FaceRecognitionService(ServiceBase):
         logger.info(f"Emitted person.detected event: {person_name} (visit_id: {visit_id})")
 
     def _emit_person_left_event(self) -> None:
-        """Emit person.left event and clear tracking state."""
+        """Emit person.left event, write visit log row, and clear tracking state."""
         if not self._current_visit_id:
             return
+
+        # Write completed visit row to CSV before clearing state
+        self._log_visit(
+            person_name=self._current_person_name or "unknown",
+            visit_id=self._current_visit_id,
+            confidence=self._visit_confidence,
+        )
 
         event = Event(
             event_type="person.left",
@@ -447,6 +481,85 @@ class FaceRecognitionService(ServiceBase):
         self._current_person_name = None
         self._cached_face_vector = None
         self._last_face_seen = 0.0
+        self._visit_start_time = None
+        self._visit_confidence = 0.0
+        self._visit_frame_count = 0
+
+    def _init_visit_log(self) -> None:
+        """Create visit_log.csv with header row if it doesn't exist."""
+        if not os.path.exists(self._visit_log_path):
+            with open(self._visit_log_path, "w", newline="") as f:
+                csv.writer(f).writerow([
+                    "person_name", "visit_id",
+                    "timestamp_in", "timestamp_out",
+                    "confidence", "frames_seen", "duration_seconds",
+                ])
+            logger.info(f"Created visit log: {self._visit_log_path}")
+
+    def _log_visit(self, person_name: str, visit_id: str, confidence: float) -> None:
+        """Append one completed-visit row to visit_log.csv."""
+        try:
+            now = time.time()
+            ts_in  = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._visit_start_time or now))
+            ts_out = time.strftime("%Y-%m-%d %H:%M:%S")
+            duration = round(now - (self._visit_start_time or now), 1)
+            with open(self._visit_log_path, "a", newline="") as f:
+                csv.writer(f).writerow([
+                    person_name, visit_id,
+                    ts_in, ts_out,
+                    f"{confidence:.1f}", self._visit_frame_count, duration,
+                ])
+            logger.info(f"Visit logged: {person_name} | {self._visit_frame_count} frames | {duration}s | conf={confidence:.1f}%")
+        except Exception as e:
+            logger.error(f"Failed to write visit log: {e}")
+
+    def _get_dataset_size(self) -> int:
+        """Return total bytes used under DATASET_DIR."""
+        total = 0
+        for dirpath, _, filenames in os.walk(DATASET_DIR):
+            for fname in filenames:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, fname))
+                except OSError:
+                    pass
+        return total
+
+    def _save_dataset_frame(self, frame: np.ndarray, confidence: float, distance: float) -> None:
+        """
+        Save one face-detected RGB frame to dataset/{person_name}/.
+        Frame is converted RGB→BGR before writing so colours are correct.
+        Skips if 30 GB cap is reached or per-visit frame limit exceeded.
+        """
+        try:
+            person_name = self._current_person_name or "unknown"
+            visit_id    = self._current_visit_id   or "no_visit"
+
+            if self._visit_frame_count >= DATASET_MAX_FRAMES_PER_VISIT:
+                logger.debug("Per-visit frame limit reached, skipping save")
+                return
+
+            # Check total dataset size every 10 frames to avoid overhead
+            if self._visit_frame_count % 10 == 0:
+                if self._get_dataset_size() >= DATASET_MAX_BYTES:
+                    logger.warning("Dataset 30 GB cap reached — stopping frame saves")
+                    return
+
+            # Sanitise person name for use as directory name
+            safe_name  = "".join(c if c.isalnum() or c in "-_" else "_" for c in person_name)
+            person_dir = os.path.join(DATASET_DIR, safe_name)
+            os.makedirs(person_dir, exist_ok=True)
+
+            ts       = time.strftime("%Y%m%d_%H%M%S") + f"_{int((time.time() % 1) * 1000):03d}ms"
+            filename = f"{ts}_conf{confidence:.0f}.jpg"
+            filepath = os.path.join(person_dir, filename)
+
+            # frame is already BGR — write directly, colours will be correct
+            cv2.imwrite(filepath, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+            self._visit_frame_count += 1
+            logger.info(f"Dataset frame saved: {filepath} (conf={confidence:.1f}%, dist={distance:.4f})")
+        except Exception as e:
+            logger.error(f"Failed to save dataset frame: {e}")
 
     def _save_debug_frame(self, frame: np.ndarray, face_locations: list) -> None:
         """

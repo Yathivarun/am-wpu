@@ -181,19 +181,22 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         # Create overlay label for face recognition results
         self.overlay_label = Gtk.Label()
         self.overlay_label.set_halign(Gtk.Align.START)
-        self.overlay_label.set_valign(Gtk.Align.START)
-        self.overlay_label.set_margin_start(20)
-        self.overlay_label.set_margin_top(20)
+        self.overlay_label.set_visible(False)
 
-        # --- Camera preview (bottom-left) ---
+        # --- Camera preview ---
         self.camera_preview = Gtk.Picture()
-        self.camera_preview.set_halign(Gtk.Align.START)
-        self.camera_preview.set_valign(Gtk.Align.END)
-        self.camera_preview.set_margin_start(16)
-        self.camera_preview.set_margin_bottom(16)
         self.camera_preview.set_size_request(320, 240)
         self.camera_preview.set_content_fit(Gtk.ContentFit.CONTAIN)
         self.camera_preview.set_visible(False)  # hidden until first frame arrives
+
+        # Stack preview + label in a vertical box — both anchored top-left
+        self.preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.preview_box.set_halign(Gtk.Align.START)
+        self.preview_box.set_valign(Gtk.Align.START)
+        self.preview_box.set_margin_start(16)
+        self.preview_box.set_margin_top(16)
+        self.preview_box.append(self.camera_preview)
+        self.preview_box.append(self.overlay_label)
 
         # Apply CSS for styling
         provider = Gtk.CssProvider()
@@ -221,11 +224,10 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         )
         self.camera_preview.add_css_class("camera-preview")
 
-        # Use GtkOverlay for overlay positioning
+        # Use GtkOverlay — single preview_box overlay contains both widgets
         overlay = Gtk.Overlay()
         overlay.set_child(self.picture)
-        overlay.add_overlay(self.overlay_label)
-        overlay.add_overlay(self.camera_preview)
+        overlay.add_overlay(self.preview_box)
 
         self.main_box.append(overlay)
         self.set_child(self.main_box)
@@ -325,7 +327,6 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         else:
             self.overlay_label.set_visible(False)
         return True  # Keep timer running
-
     def update_camera_preview(self):
         """Refresh the bottom-left camera preview from the latest captured frame."""
         face_service = getattr(self.service, "face_service", None)
