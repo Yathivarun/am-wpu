@@ -30,6 +30,7 @@ class FaceRecognitionConfig(BaseModel):
     camera_id: int = 0
     n: int = 3
     api_endpoint: str = "http://localhost:8000/api/v1/identify/"
+    # api_endpoint: str = "http://10.2.135.25:8000/api/v1/identify"
     wpu_endpoint: str = "http://localhost:8000/api/v1/wpu/images"
     detection_interval: int = 5  # seconds between captures
     min_face_size: int = 100  # minimum face size in pixels

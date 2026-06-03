@@ -35,12 +35,6 @@ class ServiceOrchestrator:
     """Orchestrates multiple services and handles graceful shutdown."""
 
     def __init__(self, services: list[ServiceBase]):
-        """
-        Initialize the orchestrator.
-
-        Args:
-            services: List of services to manage
-        """
         self.services = services
         self._shutdown_requested = False
 
@@ -48,24 +42,19 @@ class ServiceOrchestrator:
         """Start all services."""
         logger.info("Starting services...")
 
-        # Check if we have a slideshow service (runs in main thread)
         has_slideshow = any(s.name == "slideshow" for s in self.services)
 
-        # Start non-GTK services first (they run in background threads)
         for service in self.services:
-            if service.name != "slideshow":  # Slideshow runs in main thread
+            if service.name != "slideshow":
                 service.start()
 
-        # Start slideshow service last (runs in main thread)
         for service in self.services:
             if service.name == "slideshow":
                 service.start()
 
-        # If no slideshow service, keep main thread alive for background services
         if not has_slideshow:
             logger.info("Running in background mode - press Ctrl+C to stop")
             try:
-                # Keep main thread alive
                 while self._has_running_services():
                     import time
                     time.sleep(0.5)
@@ -73,23 +62,18 @@ class ServiceOrchestrator:
                 pass
 
     def _has_running_services(self) -> bool:
-        """Check if any services are still running."""
         return any(service.is_running() for service in self.services)
 
     def stop(self) -> None:
         """Stop all services."""
         logger.info("Stopping services...")
-
-        # Stop in reverse order
         for service in reversed(self.services):
             service.stop()
-
         logger.info("All services stopped")
 
 
 def main():
     """Main entry point."""
-    # Parse command line arguments
     parser = argparse.ArgumentParser(description="WPU Client - Face Recognition Slideshow")
     parser.add_argument(
         "--service",
@@ -109,20 +93,15 @@ def main():
     )
     args = parser.parse_args()
 
-    # Set log level
     logging.getLogger().setLevel(getattr(logging, args.log_level))
 
-    # Load configuration
     settings = get_settings()
     if args.config:
         from wpu_client.config.settings import reload_settings
-
         settings = reload_settings(args.config)
 
-    # Get event bus
     event_bus = get_event_bus()
 
-    # Create services based on arguments
     services = []
     face_recognition_service = None
 
@@ -141,7 +120,7 @@ def main():
                     settings.services.slideshow,
                     event_bus,
                     settings.services.face_recognition.wpu_endpoint,
-                    face_recognition_service,  # pass for camera preview
+                    face_recognition_service,
                 )
             )
             logger.info("Slideshow service added")
@@ -152,12 +131,9 @@ def main():
         logger.error("No services enabled. Exiting.")
         sys.exit(1)
 
-    # Create orchestrator
     orchestrator = ServiceOrchestrator(services)
 
-    # Set up signal handlers for graceful shutdown
     def signal_handler(signum, frame):
-        """Handle shutdown signals."""
         logger.info(f"Received signal {signum}, shutting down...")
         orchestrator.stop()
         sys.exit(0)
@@ -166,7 +142,6 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     try:
-        # Start all services
         orchestrator.start()
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")

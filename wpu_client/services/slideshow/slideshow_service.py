@@ -167,16 +167,11 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         self.picture.set_vexpand(True)
         self.picture.set_hexpand(True)
 
-        # Set scaling based on config
-        scale_mode = config.scale_mode
-        if scale_mode == "fill":
-            self.picture.set_content_fit(Gtk.ContentFit.FILL)
-        elif scale_mode == "fit":
-            self.picture.set_content_fit(Gtk.ContentFit.CONTAIN)
-        elif scale_mode == "crop":
-            self.picture.set_content_fit(Gtk.ContentFit.COVER)
-        else:
-            self.picture.set_content_fit(Gtk.ContentFit.FILL)
+        # Content fit is set dynamically per image in load_image() so that
+        # portrait images use COVER (fills screen, clips edges, no stretch)
+        # while landscape images respect the operator-configured scale_mode.
+        # Set a safe default until the first image loads.
+        self.picture.set_content_fit(Gtk.ContentFit.CONTAIN)
 
         # Create overlay label for face recognition results
         self.overlay_label = Gtk.Label()
@@ -267,6 +262,42 @@ class SlideshowWindow(Gtk.ApplicationWindow):
 
         logger.info(f"Updated image list: {len(new_images)} images, mode={mode}")
 
+    def _get_content_fit_for_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf) -> Gtk.ContentFit:
+        """
+        Determine the appropriate ContentFit mode based on image orientation.
+
+        Portrait images (taller than wide) are displayed with COVER so they fill
+        the full TV screen without any stretching — the narrow sides are cropped
+        minimally.  Landscape images use the operator-configured scale_mode so
+        their existing appearance is unchanged.
+
+        Args:
+            pixbuf: The loaded GdkPixbuf whose dimensions we inspect.
+
+        Returns:
+            Gtk.ContentFit value to apply to self.picture.
+        """
+        width = pixbuf.get_width()
+        height = pixbuf.get_height()
+        is_portrait = height > width
+
+        if is_portrait:
+            # COVER fills the screen while preserving aspect ratio; any overflow
+            # is clipped rather than stretched, which is the correct TV behaviour
+            # for a portrait photo.
+            return Gtk.ContentFit.CONTAIN
+
+        # Landscape — honour the operator's configured preference
+        scale_mode = self.config.scale_mode
+        if scale_mode == "fill":
+            return Gtk.ContentFit.FILL
+        elif scale_mode == "fit":
+            return Gtk.ContentFit.CONTAIN
+        elif scale_mode == "crop":
+            return Gtk.ContentFit.COVER
+        else:
+            return Gtk.ContentFit.FILL
+
     def load_image(self, index):
         """Load and display image at given index."""
         if not self.image_files or index >= len(self.image_files):
@@ -287,14 +318,24 @@ class SlideshowWindow(Gtk.ApplicationWindow):
                 loader.write(response.content)
                 loader.close()
                 pixbuf = loader.get_pixbuf()
-                texture = Gdk.Texture.new_for_pixbuf(pixbuf)
             else:
-                # Load from local file
-                texture = Gdk.Texture.new_from_filename(image_path)
+                # Load from local file into a pixbuf so we can inspect dimensions
+                pixbuf = GdkPixbuf.Pixbuf.new_from_file(image_path)
 
+            # Adjust content-fit dynamically based on whether the image is
+            # portrait or landscape before converting to a texture.
+            content_fit = self._get_content_fit_for_pixbuf(pixbuf)
+            self.picture.set_content_fit(content_fit)
+
+            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
             self.picture.set_paintable(texture)
             self.current_index = index
-            logger.debug(f"Displaying: {os.path.basename(image_path) if not image_path.startswith('http') else 'visitor image'}")
+
+            orientation = "portrait" if pixbuf.get_height() > pixbuf.get_width() else "landscape"
+            logger.debug(
+                f"Displaying ({orientation}, fit={content_fit.value_nick}): "
+                f"{os.path.basename(image_path) if not image_path.startswith('http') else 'visitor image'}"
+            )
         except Exception as e:
             logger.error(f"Error loading image {index}: {e}")
 

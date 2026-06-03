@@ -60,7 +60,8 @@ htmlcov/
 
 dataset/
 data-alloy/
-stock_images
+stock_images/
+embedding_logs/
 
 wpu_client/services/face_recognition/exp3_freeze90_arcface.onnx
 wpu_client/services/face_recognition/face_detection_yunet_2023mar.onnx

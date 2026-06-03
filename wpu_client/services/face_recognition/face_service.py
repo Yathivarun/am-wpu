@@ -13,7 +13,6 @@ DATASET_MAX_BYTES = 30 * 1024 * 1024 * 1024  # 30 GB hard cap
 DATASET_MAX_FRAMES_PER_VISIT = 50             # max frames saved per visit
 
 import cv2
-import face_recognition
 import numpy as np
 from picamera2 import Picamera2
 from scipy.spatial.distance import cosine
@@ -30,6 +29,17 @@ logger = logging.getLogger(__name__)
 SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "0") == "1"
 DEBUG_FRAME_DIR = "/tmp/face_detection_debug"
 
+# Model paths
+YUNET_MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "face_detection_yunet_2023mar.onnx",
+)
+
+GLINTR100_MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "glintr100_int8_static_150.onnx",
+)
+
 
 class FaceRecognitionService(ServiceBase):
     """
@@ -37,6 +47,9 @@ class FaceRecognitionService(ServiceBase):
     detects faces, and identifies them via API.
 
     Tracks person presence and emits events when person is detected or leaves.
+    Embeddings are generated locally on the Pi using YuNet (detection) +
+    GlintR100-INT8 (recognition). The embedding vector is sent to the server
+    API only for identity lookup against the known-faces database.
     Uses cached face vector for local matching after initial recognition.
     """
 
@@ -76,12 +89,16 @@ class FaceRecognitionService(ServiceBase):
         # Debug frame saving
         self._frame_save_counter = 0
         self._frames_since_last_save = 0
-        self._max_debug_frames = 50  # Limit total frames to avoid filling disk
-        self._save_every_n_frames = 2  # Save every Nth frame (change to 1 for every frame)
+        self._max_debug_frames = 50
+        self._save_every_n_frames = 2
         if SAVE_DEBUG_FRAMES:
             os.makedirs(DEBUG_FRAME_DIR, exist_ok=True)
             logger.info(f"Debug frame saving enabled. Saving every {self._save_every_n_frames} frames (max {self._max_debug_frames} total)")
             logger.info(f"Debug frames will be saved to {DEBUG_FRAME_DIR}")
+
+        # Models (initialised in start())
+        self._yunet_detector: Optional[cv2.FaceDetectorYN] = None
+        self._glintr100_session = None
 
     def start(self) -> None:
         """Start the face recognition service."""
@@ -90,8 +107,10 @@ class FaceRecognitionService(ServiceBase):
             return
 
         logger.info("Starting face recognition service")
-        logger.info(f"Configuration: detection_interval={self.config.detection_interval}s, "
-                   f"min_face_size={self.config.min_face_size}px, n={self.config.n}")
+        logger.info(
+            f"Configuration: detection_interval={self.config.detection_interval}s, "
+            f"min_face_size={self.config.min_face_size}px, n={self.config.n}"
+        )
         logger.info(f"API endpoint: {self.config.api_endpoint}")
         self._running = True
         self._stop_event.clear()
@@ -99,10 +118,9 @@ class FaceRecognitionService(ServiceBase):
         # Initialize HTTP client
         self._http_client = HTTPClient(timeout=10.0, max_retries=3)
 
-        # Initialize camera using Picamera2
+        # Initialize camera
         try:
             self._camera = Picamera2()
-            # Main stream: full-res RGB for face recognition
             config = self._camera.create_preview_configuration(
                 main={"size": (640, 480), "format": "RGB888"},
             )
@@ -111,6 +129,42 @@ class FaceRecognitionService(ServiceBase):
             logger.info("Picamera2 started successfully (640×480 RGB888)")
         except Exception as e:
             logger.error(f"Failed to start Picamera2: {e}")
+            self._running = False
+            return
+
+        # Initialize YuNet detector
+        try:
+            self._yunet_detector = cv2.FaceDetectorYN.create(
+                model=YUNET_MODEL_PATH,
+                config="",
+                input_size=(320, 320),
+                score_threshold=0.6,
+                nms_threshold=0.3,
+                top_k=5000,
+            )
+            logger.info(f"YuNet detector initialised: {os.path.basename(YUNET_MODEL_PATH)}")
+        except Exception as e:
+            logger.error(f"Failed to initialise YuNet: {e}")
+            self._running = False
+            return
+
+        # Initialize GlintR100-INT8 recogniser
+        # GlintR100 is an ArcFace-family model (Glint360K) — same preprocessing
+        # as AuraFace: resize to 112×112, normalise with (x - 127.5) / 127.5,
+        # NCHW layout, L2-normalise output embedding.
+        try:
+            import onnxruntime as ort
+            self._glintr100_session = ort.InferenceSession(
+                GLINTR100_MODEL_PATH,
+                providers=["CPUExecutionProvider"],
+            )
+            inp = self._glintr100_session.get_inputs()[0]
+            logger.info(
+                f"GlintR100 recogniser initialised: {os.path.basename(GLINTR100_MODEL_PATH)} "
+                f"| input: {inp.name} {inp.shape} {inp.type}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialise GlintR100: {e}")
             self._running = False
             return
 
@@ -126,16 +180,13 @@ class FaceRecognitionService(ServiceBase):
         self._running = False
         self._stop_event.set()
 
-        # Wait for thread to finish
         self._wait_for_thread(timeout=5.0)
 
-        # Stop camera
         if self._camera:
             self._camera.stop()
             self._camera.close()
             self._camera = None
 
-        # Close HTTP client
         if self._http_client:
             self._http_client.close()
             self._http_client = None
@@ -172,10 +223,9 @@ class FaceRecognitionService(ServiceBase):
             except Exception as e:
                 logger.error(f"Error in recognition loop: {e}", exc_info=True)
 
-            # Wait for the configured interval
             self._stop_event.wait(self.config.detection_interval)
 
-        # Emit person.left event if someone was being tracked
+        # Emit person.left event if someone was being tracked when we stopped
         with self._person_lock:
             if self._current_visit_id:
                 self._emit_person_left_event()
@@ -183,35 +233,49 @@ class FaceRecognitionService(ServiceBase):
         logger.info("Face recognition loop ended")
 
     def _capture_and_process(self) -> None:
-        """Capture frame, detect face, and process (identify or match locally)."""
+        """Capture frame, detect face, generate embedding locally, then identify."""
         if not self._camera:
             logger.warning("Camera is not available")
             return
 
-        # Capture frame from Picamera2 (already in RGB format)
         try:
             frame = self._camera.capture_array("main")
         except Exception as e:
             logger.warning(f"Failed to capture frame: {e}")
             return
 
-        logger.info(f"Frame captured: {frame.shape[1]}x{frame.shape[0]} pixels, dtype={frame.dtype}, "
-                   f"range=[{frame.min():.1f}, {frame.max():.1f}], detecting faces...")
+        logger.info(
+            f"Frame captured: {frame.shape[1]}x{frame.shape[0]} px, "
+            f"dtype={frame.dtype}, range=[{frame.min():.1f}, {frame.max():.1f}]"
+        )
 
-        # frame is BGR from capture_array("main") — convert to RGB for face_recognition
+        # capture_array("main") gives BGR despite RGB888 config
         bgr_frame = frame
         rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
 
-        # Detect faces with timing
-        logger.debug("Running HOG face detection model...")
+        # ── Face detection: YuNet ──────────────────────────────────────────
+        logger.debug("Running YuNet face detection...")
+        h, w = bgr_frame.shape[:2]
+        self._yunet_detector.setInputSize((w, h))
         start_time = time.time()
-        face_locations = face_recognition.face_locations(rgb_frame, model="hog")
+        _, faces = self._yunet_detector.detect(bgr_frame)
         detection_time = time.time() - start_time
 
-        if not face_locations:
-            logger.info(f"No faces detected in frame (detection took {detection_time:.2f}s)")
+        # Convert YuNet [x, y, w, h, ...] → dlib CSS (top, right, bottom, left)
+        face_locations = []
+        if faces is not None:
+            coord_limit = 10 * max(h, w)
+            for row in faces:
+                arr = np.asarray(row, dtype=np.float64)
+                if not np.all(np.isfinite(arr)):
+                    continue
+                if float(np.max(np.abs(arr[:14]))) > coord_limit:
+                    continue
+                x, y, fw, fh = arr[:4]
+                face_locations.append((int(y), int(x + fw), int(y + fh), int(x)))
 
-            # Save debug frames periodically to help diagnose issues
+        if not face_locations:
+            logger.info(f"No faces detected (took {detection_time:.2f}s)")
             if SAVE_DEBUG_FRAMES:
                 self._frames_since_last_save += 1
                 if self._frames_since_last_save >= self._save_every_n_frames:
@@ -222,22 +286,17 @@ class FaceRecognitionService(ServiceBase):
                     self._frames_since_last_save = 0
             return
 
-        logger.info(f"Detected {len(face_locations)} face(s) (detection took {detection_time:.2f}s)")
+        logger.info(f"Detected {len(face_locations)} face(s) (took {detection_time:.2f}s)")
 
-        # Save debug frame when face is detected
-        if SAVE_DEBUG_FRAMES:
-            if self._frame_save_counter < self._max_debug_frames:
-                self._save_debug_frame(rgb_frame, face_locations)
-            else:
-                logger.info(f"Reached max debug frames ({self._max_debug_frames}), not saving more")
+        if SAVE_DEBUG_FRAMES and self._frame_save_counter < self._max_debug_frames:
+            self._save_debug_frame(rgb_frame, face_locations)
 
-        # Find the largest face (by area)
+        # Use the largest face
         largest_face = max(
             face_locations,
             key=lambda loc: (loc[2] - loc[0]) * (loc[3] - loc[1]),
         )
 
-        # Check if face is large enough
         top, right, bottom, left = largest_face
         face_width = right - left
         face_height = bottom - top
@@ -246,64 +305,76 @@ class FaceRecognitionService(ServiceBase):
             logger.info(f"Face too small: {face_width}x{face_height} (minimum: {self.config.min_face_size})")
             return
 
-        logger.info(f"Using face at {left},{top} to {right},{bottom} (size: {face_width}x{face_height})")
+        logger.info(f"Using face at ({left},{top})→({right},{bottom}), size: {face_width}x{face_height}")
 
-        # Encode face to 128D vector
-        logger.info("Encoding face to 128D vector...")
-        face_encodings = face_recognition.face_encodings(rgb_frame, [largest_face])
+        # ── Embedding: GlintR100-INT8 (ArcFace, Glint360K) ────────────────
+        # Preprocessing identical to AuraFace / standard ArcFace:
+        #   • crop face region from RGB frame
+        #   • resize to 112×112
+        #   • normalise: (pixel - 127.5) / 127.5  →  range [-1, 1]
+        #   • layout: NCHW (1, 3, 112, 112)
+        #   • L2-normalise output vector before comparison / sending to API
+        logger.info("Encoding face with GlintR100-INT8...")
+        face_crop = rgb_frame[top:bottom, left:right]
+        face_resized = cv2.resize(face_crop, (112, 112))
+        face_input = (face_resized.astype(np.float32) - 127.5) / 127.5
+        face_input = np.transpose(face_input, (2, 0, 1))[np.newaxis, :]  # (1, 3, 112, 112)
 
-        if not face_encodings:
-            logger.warning("Failed to encode face - face encoding returned empty result")
-            return
+        input_name = self._glintr100_session.get_inputs()[0].name
+        face_array = self._glintr100_session.run(None, {input_name: face_input})[0][0]
 
-        face_vector = face_encodings[0].tolist()
-        logger.info(f"Face encoded successfully (128D vector, first 3 values: [{face_vector[0]:.4f}, {face_vector[1]:.4f}, {face_vector[2]:.4f}])")
+        # L2-normalise (standard for ArcFace-family models)
+        face_array = face_array / (np.linalg.norm(face_array) + 1e-8)
+        face_vector = face_array.tolist()
 
-        # Process the face vector — pass bgr_frame so imwrite saves correct colours
+        logger.info(
+            f"Face encoded ({len(face_vector)}D, "
+            f"first 3: [{face_vector[0]:.4f}, {face_vector[1]:.4f}, {face_vector[2]:.4f}])"
+        )
+
+        # bgr_frame passed on so dataset frames are saved with correct colours
         self._process_face_vector(face_vector, bgr_frame)
 
     def _process_face_vector(self, face_vector: list[float], frame: np.ndarray) -> None:
         """
-        Process face vector - either match locally or send to API for identification.
+        Process face vector — local cosine match if we have a cached vector for
+        the current visitor, otherwise forward to the server for identity lookup.
 
         Args:
-            face_vector: 128D face embedding vector as list of floats
-            frame: RGB frame from camera — saved to dataset after we have name + confidence
+            face_vector: 512D face embedding (L2-normalised)
+            frame: BGR frame — saved to dataset once we have name + confidence
         """
         with self._person_lock:
             now = time.time()
 
-            # Check if we have a cached face to match against
             if self._cached_face_vector is not None:
-                logger.info("Cached face vector exists - performing local similarity check...")
-                # Do local matching
+                logger.info("Cached face vector exists — performing local similarity check...")
                 similarity = self._compute_face_similarity(face_vector, self._cached_face_vector)
-                logger.info(f"Face similarity (cosine distance): {similarity:.4f} (threshold: {self._similarity_threshold})")
+                logger.info(
+                    f"Cosine distance: {similarity:.4f} (threshold: {self._similarity_threshold})"
+                )
 
                 if similarity < self._similarity_threshold:
-                    # Same person - update last seen time
+                    # Same person — just update timestamp and save frame
                     self._last_face_seen = now
                     confidence = (1.0 - similarity) * 100
-                    logger.info(f"Same person: {self._current_person_name} (similarity: {similarity:.4f})")
-                    # Save frame now — we have name and real confidence
+                    logger.info(f"Same person confirmed: {self._current_person_name} (dist={similarity:.4f})")
                     self._save_dataset_frame(frame, confidence=confidence, distance=similarity)
                     return
                 else:
-                    # Different person - need to identify them
-                    logger.info(f"Different person detected (similarity: {similarity:.4f} > threshold), sending to API...")
+                    logger.info(
+                        f"Different person detected (dist={similarity:.4f} > threshold) "
+                        f"— forwarding to API for identification..."
+                    )
             else:
-                logger.info("No cached face vector - sending to API for identification...")
+                logger.info("No cached face vector — forwarding to API for identification...")
 
-            # No cached face or different person - send to API for identification
+            # Send embedding to server for identity lookup
             self._send_identification_request(face_vector, frame)
 
     def _compute_face_similarity(self, face_vector1: list[float], face_vector2: list[float]) -> float:
         """
         Compute cosine distance between two face vectors.
-
-        Args:
-            face_vector1: First face vector (128D)
-            face_vector2: Second face vector (128D)
 
         Returns:
             Cosine distance (0 = identical, 1 = completely different)
@@ -312,171 +383,164 @@ class FaceRecognitionService(ServiceBase):
             return cosine(face_vector1, face_vector2)
         except Exception as e:
             logger.error(f"Error computing face similarity: {e}")
-            return 1.0  # Return max distance if computation fails
+            return 1.0  # Return max distance on error
 
     def _send_identification_request(self, face_vector: list[float], frame: np.ndarray) -> None:
         """
-        Send face identification request to API.
+        Send locally-generated face embedding to the server API for identity lookup.
+        No face recognition happens server-side — it only matches the vector against
+        its known-faces database and returns a name + confidence score.
 
         Args:
-            face_vector: 128D face embedding vector as list of floats
-            frame: RGB frame — saved to dataset after we receive name + confidence from API
+            face_vector: 512D L2-normalised embedding vector
+            frame: BGR frame — saved to dataset after we receive name + confidence
         """
         if not self._http_client:
             logger.warning("HTTP client not available")
             return
 
         try:
-            # Create request with comma-separated vector string
             request = IdentifyRequest.from_vector_list(
                 type="face",
                 n=self.config.n,
                 face_vector=face_vector,
             )
-
             request_data = request.model_dump()
 
-            # Log request details (show vector preview, not full 128 values)
-            vector_preview = f"{len(face_vector)}D vector, first 3: [{face_vector[0]:.4f}, {face_vector[1]:.4f}, {face_vector[2]:.4f}]"
+            vector_preview = (
+                f"{len(face_vector)}D vector, "
+                f"first 3: [{face_vector[0]:.4f}, {face_vector[1]:.4f}, {face_vector[2]:.4f}]"
+            )
             logger.info(f"Sending POST request to {self.config.api_endpoint}")
-            logger.info(f"Request data: type={request_data['type']}, n={request_data['n']}, vector={vector_preview}")
+            logger.info(f"Request: type={request_data['type']}, n={request_data['n']}, vector={vector_preview}")
 
-            # Send as form-encoded data (application/x-www-form-urlencoded)
             response_data = self._http_client.post(
                 self.config.api_endpoint,
                 data=request_data,
             )
-
-            # Log raw response body
             logger.info(f"Raw response body: {response_data}")
 
-            # Parse response using the response model
             response = IdentifyResponse(**response_data)
 
-            # Get confidence - API may return it as 0-1 or 0-100
+            # API may return confidence as 0–1 or 0–100; normalise to 0–100
             confidence = response.confidence or 0.0
             if confidence <= 1.0:
                 confidence = confidence * 100
 
             logger.info(
-                f"Identification result: {response.name} ({confidence:.1f}%) - "
-                f"match_type: {response.match_type}, distance: {response.distance}"
+                f"Identification result: {response.name} ({confidence:.1f}%) | "
+                f"match_type={response.match_type}, distance={response.distance}"
             )
 
-            # Update person tracking and emit events
             self._update_person_tracking(response.visit_id, face_vector, response.name, confidence)
-
-            # Save frame — we now have person name and real confidence from API
             self._save_dataset_frame(frame, confidence=confidence, distance=response.distance or 0.0)
 
-            # Publish face.recognized event for overlay display
             if self.config.display_result and response.success:
-                event = Event(
+                self.event_bus.publish(Event(
                     event_type="face.recognized",
                     data={
                         "person_name": response.person_name,
                         "confidence": confidence,
                         "hide_delay": self.config.overlay_hide_delay,
                     },
-                )
-                self.event_bus.publish(event)
+                ))
 
         except Exception as e:
-            logger.error(f"Failed to send identification request: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(
+                f"Failed to send identification request: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
 
     def _update_person_tracking(
         self,
         visit_id: Optional[str],
         face_vector: list[float],
         person_name: Optional[str],
-        confidence: float
+        confidence: float,
     ) -> None:
         """
         Update person tracking state and emit appropriate events.
 
         Args:
             visit_id: Visit ID from identification response
-            face_vector: Face vector to cache
+            face_vector: Face vector to cache for subsequent local matching
             person_name: Person name from identification response
-            confidence: Confidence score
+            confidence: Confidence score (0–100)
         """
         now = time.time()
 
-        # Check if this is the same person (by visit_id)
         if visit_id and visit_id == self._current_visit_id:
-            # Same person - update cache and last seen time
+            # Same visit — refresh cache and timestamp
             self._cached_face_vector = face_vector
             self._last_face_seen = now
             logger.debug(f"Updated cached vector for {person_name} (visit_id: {visit_id})")
             return
 
-        # New person detected
+        # New person
         if visit_id:
-            # If we were tracking someone, emit person.left first
             if self._current_visit_id:
                 self._emit_person_left_event()
 
-            # Set new person
             self._current_visit_id = visit_id
             self._current_person_name = person_name
             self._cached_face_vector = face_vector
             self._last_face_seen = now
-
-            # Emit person.detected event
             self._emit_person_detected_event(visit_id, person_name, confidence)
 
     def _check_person_timeout(self) -> None:
-        """Check if the current person has left (no face detected for timeout period)."""
+        """Emit person.left if no face has been seen within the timeout window."""
         with self._person_lock:
             if not self._current_visit_id:
                 return
 
-            now = time.time()
-            time_since_last_seen = now - self._last_face_seen
-
+            time_since_last_seen = time.time() - self._last_face_seen
             if time_since_last_seen >= self.config.person_timeout:
-                logger.info(f"Person timeout: {self._current_person_name} not seen for {time_since_last_seen:.1f}s")
+                logger.info(
+                    f"Person timeout: {self._current_person_name} "
+                    f"not seen for {time_since_last_seen:.1f}s"
+                )
                 self._emit_person_left_event()
 
-    def _emit_person_detected_event(self, visit_id: str, person_name: str, confidence: float) -> None:
+    def _emit_person_detected_event(
+        self, visit_id: str, person_name: str, confidence: float
+    ) -> None:
         """Emit person.detected event and start visit tracking."""
         self._visit_start_time = time.time()
         self._visit_confidence = confidence
         self._visit_frame_count = 0
-        event = Event(
+        self.event_bus.publish(Event(
             event_type="person.detected",
             data={
                 "visit_id": visit_id,
                 "person_name": person_name,
                 "confidence": confidence,
             },
-        )
-        self.event_bus.publish(event)
-        logger.info(f"Emitted person.detected event: {person_name} (visit_id: {visit_id})")
+        ))
+        logger.info(f"Emitted person.detected: {person_name} (visit_id: {visit_id})")
 
     def _emit_person_left_event(self) -> None:
         """Emit person.left event, write visit log row, and clear tracking state."""
         if not self._current_visit_id:
             return
 
-        # Write completed visit row to CSV before clearing state
         self._log_visit(
             person_name=self._current_person_name or "unknown",
             visit_id=self._current_visit_id,
             confidence=self._visit_confidence,
         )
 
-        event = Event(
+        self.event_bus.publish(Event(
             event_type="person.left",
             data={
                 "visit_id": self._current_visit_id,
                 "person_name": self._current_person_name,
             },
+        ))
+        logger.info(
+            f"Emitted person.left: {self._current_person_name} "
+            f"(visit_id: {self._current_visit_id})"
         )
-        self.event_bus.publish(event)
-        logger.info(f"Emitted person.left event: {self._current_person_name} (visit_id: {self._current_visit_id})")
 
-        # Clear tracking state
         self._current_visit_id = None
         self._current_person_name = None
         self._cached_face_vector = None
@@ -486,7 +550,7 @@ class FaceRecognitionService(ServiceBase):
         self._visit_frame_count = 0
 
     def _init_visit_log(self) -> None:
-        """Create visit_log.csv with header row if it doesn't exist."""
+        """Create visit_log.csv with header row if it does not already exist."""
         if not os.path.exists(self._visit_log_path):
             with open(self._visit_log_path, "w", newline="") as f:
                 csv.writer(f).writerow([
@@ -500,7 +564,7 @@ class FaceRecognitionService(ServiceBase):
         """Append one completed-visit row to visit_log.csv."""
         try:
             now = time.time()
-            ts_in  = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._visit_start_time or now))
+            ts_in = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._visit_start_time or now))
             ts_out = time.strftime("%Y-%m-%d %H:%M:%S")
             duration = round(now - (self._visit_start_time or now), 1)
             with open(self._visit_log_path, "a", newline="") as f:
@@ -509,7 +573,10 @@ class FaceRecognitionService(ServiceBase):
                     ts_in, ts_out,
                     f"{confidence:.1f}", self._visit_frame_count, duration,
                 ])
-            logger.info(f"Visit logged: {person_name} | {self._visit_frame_count} frames | {duration}s | conf={confidence:.1f}%")
+            logger.info(
+                f"Visit logged: {person_name} | {self._visit_frame_count} frames | "
+                f"{duration}s | conf={confidence:.1f}%"
+            )
         except Exception as e:
             logger.error(f"Failed to write visit log: {e}")
 
@@ -526,9 +593,8 @@ class FaceRecognitionService(ServiceBase):
 
     def _save_dataset_frame(self, frame: np.ndarray, confidence: float, distance: float) -> None:
         """
-        Save one face-detected RGB frame to dataset/{person_name}/.
-        Frame is converted RGB→BGR before writing so colours are correct.
-        Skips if 30 GB cap is reached or per-visit frame limit exceeded.
+        Save one face-detected BGR frame to dataset/{person_name}/.
+        Skips if the 30 GB cap is reached or the per-visit frame limit is exceeded.
         """
         try:
             person_name = self._current_person_name or "unknown"
@@ -538,13 +604,11 @@ class FaceRecognitionService(ServiceBase):
                 logger.debug("Per-visit frame limit reached, skipping save")
                 return
 
-            # Check total dataset size every 10 frames to avoid overhead
             if self._visit_frame_count % 10 == 0:
                 if self._get_dataset_size() >= DATASET_MAX_BYTES:
                     logger.warning("Dataset 30 GB cap reached — stopping frame saves")
                     return
 
-            # Sanitise person name for use as directory name
             safe_name  = "".join(c if c.isalnum() or c in "-_" else "_" for c in person_name)
             person_dir = os.path.join(DATASET_DIR, safe_name)
             os.makedirs(person_dir, exist_ok=True)
@@ -553,7 +617,7 @@ class FaceRecognitionService(ServiceBase):
             filename = f"{ts}_conf{confidence:.0f}.jpg"
             filepath = os.path.join(person_dir, filename)
 
-            # frame is already BGR — write directly, colours will be correct
+            # frame is BGR — write directly so colours are correct
             cv2.imwrite(filepath, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
             self._visit_frame_count += 1
@@ -563,33 +627,36 @@ class FaceRecognitionService(ServiceBase):
 
     def _save_debug_frame(self, frame: np.ndarray, face_locations: list) -> None:
         """
-        Save a debug frame with face boxes drawn on it.
+        Save a debug frame with face bounding boxes drawn on it.
 
         Args:
             frame: RGB frame from camera
-            face_locations: List of face location tuples (top, right, bottom, left)
+            face_locations: List of (top, right, bottom, left) tuples
         """
-        logger.info(f"_save_debug_frame called: frame shape={frame.shape}, faces={len(face_locations)}")
+        logger.info(f"_save_debug_frame: frame={frame.shape}, faces={len(face_locations)}")
         self._frame_save_counter += 1
 
         try:
-            # Convert to BGR for OpenCV (it uses BGR by default)
             frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-            # Draw face boxes
             for top, right, bottom, left in face_locations:
                 cv2.rectangle(frame_bgr, (left, top), (right, bottom), (0, 255, 0), 2)
-                cv2.putText(frame_bgr, f"Face {right-left}x{bottom-top}",
-                           (left, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                cv2.putText(
+                    frame_bgr,
+                    f"Face {right - left}x{bottom - top}",
+                    (left, top - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2,
+                )
 
-            # Add info text
-            info_text = f"Frame #{self._frame_save_counter} - Faces: {len(face_locations)}"
-            cv2.putText(frame_bgr, info_text, (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(
+                frame_bgr,
+                f"Frame #{self._frame_save_counter} - Faces: {len(face_locations)}",
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2,
+            )
 
-            # Save frame
             filepath = os.path.join(DEBUG_FRAME_DIR, f"frame_{self._frame_save_counter:04d}.jpg")
             cv2.imwrite(filepath, frame_bgr)
-            logger.info(f"Saved debug frame to {filepath}")
+            logger.info(f"Saved debug frame: {filepath}")
         except Exception as e:
             logger.error(f"Failed to save debug frame: {e}", exc_info=True)

@@ -15,4 +15,5 @@ dependencies = [
     "setuptools==80.10.2",
     "scipy",
     "picamera2",
+    "onnxruntime>=1.26.0",
 ]
