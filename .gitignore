@@ -9,7 +9,6 @@ wheels/
 # Virtual environments
 .venv
 
-
 # Python cache
 __pycache__/
 *.py[cod]
@@ -58,3 +57,11 @@ htmlcov/
 # Temporary files
 *.tmp
 *.temp
+
+dataset/
+data-alloy/
+stock_images
+
+wpu_client/services/face_recognition/exp3_freeze90_arcface.onnx
+wpu_client/services/face_recognition/face_detection_yunet_2023mar.onnx
+wpu_client/services/face_recognition/glintr100_int8_static_150.onnx
