@@ -40,7 +40,6 @@ GLINTR100_MODEL_PATH = os.path.join(
     "glintr100_int8_static_150.onnx",
 )
 
-
 class FaceRecognitionService(ServiceBase):
     """
     Face recognition service that continuously captures images,
@@ -61,6 +60,10 @@ class FaceRecognitionService(ServiceBase):
             config: Face recognition configuration
             event_bus: Event bus for inter-service communication
         """
+        import psutil
+        import os
+        self._process = psutil.Process(os.getpid())
+
         super().__init__("face_recognition")
         self.config = config
         self.event_bus = event_bus
@@ -152,13 +155,22 @@ class FaceRecognitionService(ServiceBase):
         # GlintR100 is an ArcFace-family model (Glint360K) — same preprocessing
         # as AuraFace: resize to 112×112, normalise with (x - 127.5) / 127.5,
         # NCHW layout, L2-normalise output embedding.
+    
         try:
             import onnxruntime as ort
+
+            sess_options = ort.SessionOptions()
+            sess_options.intra_op_num_threads = 4
+
             self._glintr100_session = ort.InferenceSession(
                 GLINTR100_MODEL_PATH,
-                providers=["CPUExecutionProvider"],
+                sess_options = sess_options,
+                providers=["XNNPACKExecutionProvider", "CPUExecutionProvider"],
             )
+            logger.info(f"Active providers: {self._glintr100_session.get_providers()}")
+
             inp = self._glintr100_session.get_inputs()[0]
+            
             logger.info(
                 f"GlintR100 recogniser initialised: {os.path.basename(GLINTR100_MODEL_PATH)} "
                 f"| input: {inp.name} {inp.shape} {inp.type}"
@@ -239,6 +251,9 @@ class FaceRecognitionService(ServiceBase):
             return
 
         try:
+            start_cpu = self._process.cpu_times()
+            start_time = time.time()
+            
             frame = self._camera.capture_array("main")
         except Exception as e:
             logger.warning(f"Failed to capture frame: {e}")
@@ -257,8 +272,26 @@ class FaceRecognitionService(ServiceBase):
         logger.debug("Running YuNet face detection...")
         h, w = bgr_frame.shape[:2]
         self._yunet_detector.setInputSize((w, h))
+
+        cpu_before = self._process.cpu_times()
+        wall_start = time.time()
+
         start_time = time.time()
         _, faces = self._yunet_detector.detect(bgr_frame)
+
+        wall_end = time.time()
+        cpu_after = self._process.cpu_times()
+        yunet_wall_ms = (wall_end - wall_start) * 1000
+        yunet_user_ms = (cpu_after.user - cpu_before.user) * 1000
+        yunet_system_ms = (cpu_after.system - cpu_before.system) * 1000
+
+        logger.info(
+            f"[YuNet] wall={yunet_wall_ms:.1f}ms | "
+            f"cpu_user={yunet_user_ms:.1f}ms | "
+            f"cpu_sys={yunet_system_ms:.1f}ms | "
+            f"cpu_util={((yunet_user_ms + yunet_system_ms) / yunet_wall_ms * 100):.1f}%"
+        )
+
         detection_time = time.time() - start_time
 
         # Convert YuNet [x, y, w, h, ...] → dlib CSS (top, right, bottom, left)
