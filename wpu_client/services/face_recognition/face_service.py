@@ -21,6 +21,7 @@ from wpu_client.config.settings import FaceRecognitionConfig
 from wpu_client.core.events import Event, EventBus
 from wpu_client.core.service_base import ServiceBase
 from wpu_client.models.api import IdentifyRequest, IdentifyResponse
+from wpu_client.services.face_recognition.diagnostic_gallery import DiagnosticGallery
 from wpu_client.utils.http import HTTPClient
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,10 @@ class FaceRecognitionService(ServiceBase):
         self._yunet_detector: Optional[cv2.FaceDetectorYN] = None
         self._sface_recognizer: Optional[cv2.FaceRecognizerSF] = None
 
+        # Diagnostic (offline) mode — local gallery instead of server /identify
+        self._diagnostic_mode: bool = getattr(config, "diagnostic_mode", False)
+        self._gallery: Optional[DiagnosticGallery] = None
+
     def start(self) -> None:
         """Start the face recognition service."""
         if self._running:
@@ -170,6 +175,22 @@ class FaceRecognitionService(ServiceBase):
             logger.error(f"Failed to initialise SFace: {e}")
             self._running = False
             return
+
+        # Diagnostic (offline) mode: load the local seeded gallery. Recognition
+        # then happens entirely on-device — no server /identify calls.
+        if self._diagnostic_mode:
+            self._gallery = DiagnosticGallery(self.config.diagnostic_gallery_dir)
+            count = self._gallery.load()
+            logger.info(
+                f"DIAGNOSTIC MODE ON — matching locally against {count} seeded "
+                f"face(s) (threshold={self.config.diagnostic_match_threshold} cosine). "
+                f"Server /identify is disabled."
+            )
+            if count == 0:
+                logger.warning(
+                    "Diagnostic gallery is empty — no one will be recognised. "
+                    "Seed faces with: python tools/seed_face.py --name ... --gender ... --face ..."
+                )
 
         # Run the recognition loop in a background thread
         self._run_in_thread(self._recognition_loop)
@@ -398,10 +419,55 @@ class FaceRecognitionService(ServiceBase):
                         f"— forwarding to API for identification..."
                     )
             else:
-                logger.info("No cached face vector — forwarding to API for identification...")
+                logger.info("No cached face vector — identifying...")
 
-            # Send embedding to server for identity lookup
-            self._send_identification_request(face_vector, frame)
+            # Diagnostic mode matches locally; normal mode asks the server.
+            if self._diagnostic_mode:
+                self._match_local_gallery(face_vector, frame)
+            else:
+                self._send_identification_request(face_vector, frame)
+
+    def _match_local_gallery(self, face_vector: list[float], frame: np.ndarray) -> None:
+        """Diagnostic mode: identify against the local seeded gallery (no server).
+
+        On a match, tracks the person and emits person.detected carrying the
+        seeded gender, which the slideshow uses to pick face_stock_images/<gender>/.
+        """
+        if not self._gallery or len(self._gallery) == 0:
+            logger.info("Diagnostic gallery empty — no local match possible")
+            return
+
+        match = self._gallery.match(face_vector, self.config.diagnostic_match_threshold)
+        if match is None:
+            logger.info(
+                f"No local match within threshold "
+                f"({self.config.diagnostic_match_threshold} cosine) — staying on stock images"
+            )
+            return
+
+        confidence = (1.0 - match.distance) * 100
+        logger.info(
+            f"Local match: {match.entry.name} ({match.entry.gender}) "
+            f"dist={match.distance:.4f} conf={confidence:.1f}%"
+        )
+        self._update_person_tracking(
+            visit_id=match.entry.slug,
+            face_vector=face_vector,
+            person_name=match.entry.name,
+            confidence=confidence,
+            gender=match.entry.gender,
+        )
+        self._save_dataset_frame(frame, confidence=confidence, distance=match.distance)
+
+        if self.config.display_result:
+            self.event_bus.publish(Event(
+                event_type="face.recognized",
+                data={
+                    "person_name": match.entry.name,
+                    "confidence": confidence,
+                    "hide_delay": self.config.overlay_hide_delay,
+                },
+            ))
 
     def _compute_face_similarity(self, face_vector1: list[float], face_vector2: list[float]) -> float:
         """
@@ -489,15 +555,17 @@ class FaceRecognitionService(ServiceBase):
         face_vector: list[float],
         person_name: Optional[str],
         confidence: float,
+        gender: Optional[str] = None,
     ) -> None:
         """
         Update person tracking state and emit appropriate events.
 
         Args:
-            visit_id: Visit ID from identification response
+            visit_id: Visit ID (server) or gallery slug (diagnostic)
             face_vector: Face vector to cache for subsequent local matching
             person_name: Person name from identification response
             confidence: Confidence score (0–100)
+            gender: "male"/"female" in diagnostic mode; None in server mode
         """
         now = time.time()
 
@@ -517,7 +585,7 @@ class FaceRecognitionService(ServiceBase):
             self._current_person_name = person_name
             self._cached_face_vector = face_vector
             self._last_face_seen = now
-            self._emit_person_detected_event(visit_id, person_name, confidence)
+            self._emit_person_detected_event(visit_id, person_name, confidence, gender)
 
     def _check_person_timeout(self) -> None:
         """Emit person.left if no face has been seen within the timeout window."""
@@ -534,9 +602,13 @@ class FaceRecognitionService(ServiceBase):
                 self._emit_person_left_event()
 
     def _emit_person_detected_event(
-        self, visit_id: str, person_name: str, confidence: float
+        self, visit_id: str, person_name: str, confidence: float, gender: Optional[str] = None
     ) -> None:
-        """Emit person.detected event and start visit tracking."""
+        """Emit person.detected event and start visit tracking.
+
+        `gender` is set in diagnostic mode and tells the slideshow which
+        face_stock_images/<gender>/ sketches to show.
+        """
         self._visit_start_time = time.time()
         self._visit_confidence = confidence
         self._visit_frame_count = 0
@@ -546,9 +618,10 @@ class FaceRecognitionService(ServiceBase):
                 "visit_id": visit_id,
                 "person_name": person_name,
                 "confidence": confidence,
+                "gender": gender,
             },
         ))
-        logger.info(f"Emitted person.detected: {person_name} (visit_id: {visit_id})")
+        logger.info(f"Emitted person.detected: {person_name} (visit_id: {visit_id}, gender: {gender})")
 
     def _emit_person_left_event(self) -> None:
         """Emit person.left event, write visit log row, and clear tracking state."""

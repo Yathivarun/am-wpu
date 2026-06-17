@@ -61,6 +61,8 @@ htmlcov/
 dataset/
 data-alloy/
 stock_images/
+face_stock_images/
+diagnostic_gallery/
 embedding_logs/
 
 wpu_client/services/face_recognition/exp3_freeze90_arcface.onnx

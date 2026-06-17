@@ -91,6 +91,12 @@ def main():
         default="INFO",
         help="Set logging level (default: INFO)",
     )
+    parser.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="Offline diagnostic mode: recognise faces against the local seeded "
+             "gallery (no server) and show local face_stock_images/<gender>/ sketches",
+    )
     args = parser.parse_args()
 
     logging.getLogger().setLevel(getattr(logging, args.log_level))
@@ -99,6 +105,11 @@ def main():
     if args.config:
         from wpu_client.config.settings import reload_settings
         settings = reload_settings(args.config)
+
+    # --diagnostic overrides config: offline local recognition + local sketches
+    if args.diagnostic:
+        settings.services.face_recognition.diagnostic_mode = True
+        logger.info("Diagnostic mode enabled via --diagnostic flag")
 
     event_bus = get_event_bus()
 
@@ -121,6 +132,7 @@ def main():
                     event_bus,
                     settings.services.face_recognition.wpu_endpoint,
                     face_recognition_service,
+                    diagnostic_mode=settings.services.face_recognition.diagnostic_mode,
                 )
             )
             logger.info("Slideshow service added")

@@ -31,7 +31,8 @@ class SlideshowService(ServiceBase):
     - Visitor images mode: Slideshow of visitor-specific WPU images
     """
 
-    def __init__(self, config: SlideshowConfig, event_bus: EventBus, wpu_endpoint: str, face_service=None):
+    def __init__(self, config: SlideshowConfig, event_bus: EventBus, wpu_endpoint: str,
+                 face_service=None, diagnostic_mode: bool = False):
         """
         Initialize the slideshow service.
 
@@ -40,12 +41,15 @@ class SlideshowService(ServiceBase):
             event_bus: Event bus for inter-service communication
             wpu_endpoint: WPU API endpoint for fetching visitor images
             face_service: Optional FaceRecognitionService for camera preview
+            diagnostic_mode: If True, show local face_stock_images/<gender>/ sketches
+                on recognition instead of fetching visitor images from the server.
         """
         super().__init__("slideshow")
         self.config = config
         self.event_bus = event_bus
         self.wpu_endpoint = wpu_endpoint
         self.face_service = face_service  # used for bottom-left camera preview
+        self.diagnostic_mode = diagnostic_mode
         self._app: Optional[SlideshowApp] = None
         self._overlay_text: Optional[str] = None
         self._overlay_hide_time: float = 0
@@ -112,16 +116,17 @@ class SlideshowService(ServiceBase):
         """Handle person detected event - fetch visitor images and switch mode."""
         visit_id = event.data.get("visit_id")
         person_name = event.data.get("person_name", "Unknown")
+        gender = event.data.get("gender")
 
         if not visit_id:
             logger.warning("person.detected event missing visit_id")
             return
 
-        logger.info(f"Person detected: {person_name} (visit_id: {visit_id})")
+        logger.info(f"Person detected: {person_name} (visit_id: {visit_id}, gender: {gender})")
 
         # Fetch WPU images and switch mode
         if self._app:
-            self._app.switch_to_visitor_mode(visit_id, person_name)
+            self._app.switch_to_visitor_mode(visit_id, person_name, gender)
 
     def _on_person_left(self, event: Event) -> None:
         """Handle person left event - switch back to stock images."""
@@ -484,15 +489,35 @@ class SlideshowApp(Gtk.Application):
             logger.error(f"Failed to fetch WPU images for visit {visit_id}: {e}")
             return []
 
-    def switch_to_visitor_mode(self, visit_id: str, person_name: str):
-        """Switch to visitor-specific images mode."""
-        logger.info(f"Switching to visitor mode: {person_name} (visit_id: {visit_id})")
+    def _load_face_sketches(self, gender: str) -> list[str]:
+        """Diagnostic mode: local face-swap sketches for a gender.
 
-        # Fetch visitor images
-        visitor_images = self._fetch_visitor_images(visit_id)
+        Reads <face_sketch_directory>/<gender>/* (e.g. face_stock_images/male/).
+        """
+        if gender not in ("male", "female"):
+            logger.warning(f"Diagnostic: invalid/missing gender {gender!r}; no sketches to show")
+            return []
+        base = os.path.join(self.config.face_sketch_directory, gender)
+        files: list[str] = []
+        for ext in self.config.image_extensions:
+            files.extend(glob.glob(os.path.join(base, ext)))
+        files.sort(key=lambda p: os.path.basename(p).lower())
+        logger.info(f"Diagnostic: loaded {len(files)} {gender} sketch(es) from {base}")
+        return files
+
+    def switch_to_visitor_mode(self, visit_id: str, person_name: str, gender: str = None):
+        """Switch to visitor-specific images mode."""
+        logger.info(f"Switching to visitor mode: {person_name} (visit_id: {visit_id}, gender: {gender})")
+
+        # Diagnostic mode shows local gender-specific sketches; normal mode
+        # fetches this visitor's generated images from the server.
+        if self.service.diagnostic_mode:
+            visitor_images = self._load_face_sketches(gender)
+        else:
+            visitor_images = self._fetch_visitor_images(visit_id)
 
         if not visitor_images:
-            logger.warning(f"No WPU images found for visit {visit_id}, staying in stock mode")
+            logger.warning(f"No images found for visit {visit_id} (gender={gender}), staying in stock mode")
             return
 
         self.visitor_images = visitor_images

@@ -21,6 +21,9 @@ class SlideshowConfig(BaseModel):
     background_color: str = "black"
     scale_mode: str = "fill"  # fill, fit, crop
     sort_mode: str = "numeric"  # numeric, alphabetical
+    # Diagnostic mode: face-swap sketches shown on recognition, split by gender
+    # into <face_sketch_directory>/male and <face_sketch_directory>/female.
+    face_sketch_directory: str = "face_stock_images"
 
 
 class FaceRecognitionConfig(BaseModel):
@@ -37,6 +40,15 @@ class FaceRecognitionConfig(BaseModel):
     display_result: bool = True  # show result on screen overlay
     overlay_hide_delay: int = 3  # seconds to hide overlay
     person_timeout: int = 10  # seconds without face before person is considered left
+
+    # Diagnostic (offline) mode — match faces against a LOCAL seeded gallery
+    # instead of the server /identify API. See tools/seed_face.py.
+    diagnostic_mode: bool = False
+    diagnostic_gallery_dir: str = "diagnostic_gallery"
+    # Cosine-distance gate for a local match. For unit vectors cosine_distance =
+    # L2^2 / 2, so the server's L2 threshold of 1.08 corresponds to ~0.58 here;
+    # 0.5 is a slightly stricter default. Tune per camera/lighting.
+    diagnostic_match_threshold: float = 0.5
 
 
 class ServicesConfig(BaseModel):

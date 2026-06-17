@@ -4,6 +4,52 @@ Face recognition slideshow application with modular service architecture.
 
 ## Changelog
 
+### 2026-06-17 Ekanth — Diagnostic (offline) mode
+
+Added a fully **offline diagnostic mode** so the WPU can recognise people and show
+sketches **without the server / Triton** (useful when the Pi can't reach the
+sandbox, or for a self-contained demo). Toggle with `--diagnostic` (or
+`diagnostic_mode: true` under `face_recognition` in `config.yaml`).
+
+**Flow:**
+1. **Seed** a known person with `tools/seed_face.py --name <N> --gender <male|female> --face <img>`.
+   The same YuNet → SFace pipeline generates a 128-D embedding, saved to
+   `diagnostic_gallery/<slug>/embedding.npy` + `meta.json` (`{name, gender}`).
+2. At runtime the face service **matches live faces against the local gallery**
+   by cosine distance (`diagnostic_match_threshold`, default `0.5`) — no `/identify`
+   call, no network.
+3. On a match it emits `person.detected` carrying the person's **gender**, and the
+   slideshow shows that gender's face-swap sketches from
+   `face_stock_images/<gender>/`. No face → stock images, as usual.
+
+**Sketch selection is by gender, not per person** (Option A): the seed stores each
+person's gender, which picks `face_stock_images/male/` or `…/female/`. Everyone of
+the same gender sees the same sketch set — matching the supplied assets (10 sketches
+split 5 male / 5 female). Chosen because diagnostic mode seeds *known* people, so the
+gender is known at seed time — zero extra models, zero runtime misclassification.
+
+**New files:**
+- `wpu_client/services/face_recognition/sface_embedder.py` — camera-free YuNet+SFace
+  embedder (no `picamera2`), the single source of truth shared by the seed tool and
+  verified byte-identical to the live service path.
+- `wpu_client/services/face_recognition/diagnostic_gallery.py` — loads seeded entries
+  and matches by cosine distance.
+- `tools/seed_face.py` — seed a face + gender into the local gallery.
+
+**Other changes:**
+- `face_service.py` — diagnostic branch (`_match_local_gallery`) replaces the server
+  call; `gender` plumbed through `person.detected`. Server mode is unchanged.
+- `slideshow_service.py` — in diagnostic mode, visitor mode loads local
+  `face_stock_images/<gender>/` sketches instead of fetching signed URLs.
+- Config: `diagnostic_mode`, `diagnostic_gallery_dir`, `diagnostic_match_threshold`,
+  `face_sketch_directory`.
+- `.gitignore` — `face_stock_images/` and `diagnostic_gallery/` are gitignored
+  (heavy assets / local data; deploy to the Pi separately like the model files).
+
+**Validated off-Pi:** seed → gallery → match works end-to-end, and the seed embedding
+is byte-identical to the live SFace probe (same first-3 values as the Stage-A harness),
+confirming gallery and live vectors share one embedding space.
+
 ### 2026-06-17 Ekanth
 
 Migrated the on-device face-recognition model from **GlintR100-INT8 (512D)** to
