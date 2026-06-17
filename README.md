@@ -44,6 +44,12 @@ ready yet), recognition still fires but the slideshow stays on stock images.
   Server mode is unchanged.
 - `slideshow_service.py` — in diagnostic mode, visitor mode loads the matched person's
   local `sketches/` folder instead of fetching signed URLs.
+- `slideshow_service.py` — **GTK main-thread fix:** the image switch on
+  `person.detected` / `person.left` now goes through `GLib.idle_add`. The recognition
+  loop runs in a background thread and publishes the event synchronously, so
+  `set_images()` was painting GTK widgets off the main loop → **blank screen** (plus a
+  `snapshot … without a current allocation` warning). This was a pre-existing bug that
+  also affected server (visitor) mode; now fixed for both.
 - Config: `diagnostic_mode`, `diagnostic_gallery_dir`, `diagnostic_match_threshold`.
 - `.gitignore` — `diagnostic_gallery/` (and the legacy `face_stock_images/`) are
   gitignored (local data / heavy assets; deploy to the Pi separately like the models).

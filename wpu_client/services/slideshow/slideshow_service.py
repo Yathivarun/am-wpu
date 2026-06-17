@@ -527,9 +527,11 @@ class SlideshowApp(Gtk.Application):
 
         self.visitor_images = visitor_images
 
-        # Update the existing window with new images
+        # This runs on the face-recognition background thread (the event is
+        # published synchronously), but set_images touches GTK widgets — which
+        # is only safe on the GTK main loop. Marshal it across with idle_add.
         if self.current_window:
-            self.current_window.set_images(self.visitor_images, mode="visitor")
+            GLib.idle_add(self.current_window.set_images, self.visitor_images, "visitor")
 
         # Update overlay to show mode change
         with self.service._overlay_lock:
@@ -540,9 +542,9 @@ class SlideshowApp(Gtk.Application):
         """Switch back to stock images mode."""
         logger.info("Switching to stock mode")
 
-        # Update the existing window with stock images
+        # Same as switch_to_visitor_mode: marshal the GTK update onto the main loop.
         if self.current_window:
-            self.current_window.set_images(self.stock_images, mode="stock")
+            GLib.idle_add(self.current_window.set_images, self.stock_images, "stock")
 
         # Clear visitor images
         self.visitor_images = []
