@@ -2,6 +2,45 @@
 
 Face recognition slideshow application with modular service architecture.
 
+## Changelog
+
+### 2026-06-17 Ekanth
+
+Migrated the on-device face-recognition model from **GlintR100-INT8 (512D)** to
+**SFace-128D (OpenCV)** to cut CPU usage on the Raspberry Pi 4 and to make the WPU
+probe embeddings comparable to the registration gallery.
+
+- **Recognition model:** `cv2.FaceRecognizerSF` with
+  `face_recognition_sface_2021dec.onnx` replaces the GlintR100 `onnxruntime`
+  session. SFace is far lighter than AuraFace/GlintR100 — AuraFace was spiking to
+  ~250% CPU (~160% even after INT8 quantization); SFace runs comfortably under one
+  core. SFace is also commercially usable.
+- **Embedding pipeline now mirrors the registration server (`SFaceBackend`)
+  exactly**, so the 128D probe vectors are directly comparable to the gallery
+  vectors in the `face_vectors_sface` Qdrant collection:
+  - Keep the **raw YuNet detection row (bbox + 5 landmarks)** — the previous code
+    discarded the landmarks and did a naive bbox crop, which is *not* valid for
+    SFace.
+  - `alignCrop(BGR frame, raw YuNet row)` → 112×112 ArcFace template →
+    `feature()` → **L2-normalise**.
+  - Largest face selected by bbox area (same rule as registration).
+- **API request:** `IdentifyRequest` now sends `model="sface"`. This is required —
+  the server cannot disambiguate a 128D vector otherwise (dlib is also 128D). The
+  server queries the `face_vectors_sface` collection and applies its calibrated
+  `sface_threshold`.
+- Model files (`face_recognition_sface_2021dec.onnx`,
+  `face_detection_yunet_2023mar.onnx`) are gitignored and deployed to the Pi
+  separately.
+
+**Operational notes:**
+- The local-cache similarity threshold (`_similarity_threshold = 0.4`, cosine)
+  governs only the "same person still here" de-dup and may need re-tuning for
+  SFace's 128D distribution. Server-side matching uses the calibrated
+  `sface_threshold` and is unaffected.
+- WPU can only recognize people who have a 128D vector in `face_vectors_sface`.
+  New registrations get one automatically; registrations made before `sface` was
+  added to the server's `registration_models` need backfilling.
+
 ## Features
 
 - **Slideshow Service**: Full-screen image display with configurable timing

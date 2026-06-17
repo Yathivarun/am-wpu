@@ -35,9 +35,9 @@ YUNET_MODEL_PATH = os.path.join(
     "face_detection_yunet_2023mar.onnx",
 )
 
-GLINTR100_MODEL_PATH = os.path.join(
+SFACE_MODEL_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "glintr100_int8_static_150.onnx",
+    "face_recognition_sface_2021dec.onnx",
 )
 
 class FaceRecognitionService(ServiceBase):
@@ -47,8 +47,11 @@ class FaceRecognitionService(ServiceBase):
 
     Tracks person presence and emits events when person is detected or leaves.
     Embeddings are generated locally on the Pi using YuNet (detection) +
-    GlintR100-INT8 (recognition). The embedding vector is sent to the server
-    API only for identity lookup against the known-faces database.
+    SFace-128D (recognition, OpenCV). The pipeline mirrors the registration
+    server's SFaceBackend exactly (alignCrop + feature + L2-normalise) so the
+    128-D probe vectors are directly comparable to the gallery vectors stored
+    in the `face_vectors_sface` Qdrant collection. The embedding is sent to the
+    server API only for identity lookup; recognition itself happens on the Pi.
     Uses cached face vector for local matching after initial recognition.
     """
 
@@ -101,7 +104,7 @@ class FaceRecognitionService(ServiceBase):
 
         # Models (initialised in start())
         self._yunet_detector: Optional[cv2.FaceDetectorYN] = None
-        self._glintr100_session = None
+        self._sface_recognizer: Optional[cv2.FaceRecognizerSF] = None
 
     def start(self) -> None:
         """Start the face recognition service."""
@@ -151,32 +154,20 @@ class FaceRecognitionService(ServiceBase):
             self._running = False
             return
 
-        # Initialize GlintR100-INT8 recogniser
-        # GlintR100 is an ArcFace-family model (Glint360K) — same preprocessing
-        # as AuraFace: resize to 112×112, normalise with (x - 127.5) / 127.5,
-        # NCHW layout, L2-normalise output embedding.
-    
+        # Initialize SFace recogniser (OpenCV)
+        # Must match the registration server's SFaceBackend exactly so the 128-D
+        # probe embeddings are comparable to the gallery vectors in the
+        # `face_vectors_sface` Qdrant collection: cv2.FaceRecognizerSF.alignCrop
+        # on the raw YuNet detection row (bbox + 5 landmarks) → feature() →
+        # L2-normalise. SFace is far lighter than AuraFace/GlintR100, which is
+        # what keeps CPU usage low on the Pi.
         try:
-            import onnxruntime as ort
-
-            sess_options = ort.SessionOptions()
-            sess_options.intra_op_num_threads = 4
-
-            self._glintr100_session = ort.InferenceSession(
-                GLINTR100_MODEL_PATH,
-                sess_options = sess_options,
-                providers=["XNNPACKExecutionProvider", "CPUExecutionProvider"],
-            )
-            logger.info(f"Active providers: {self._glintr100_session.get_providers()}")
-
-            inp = self._glintr100_session.get_inputs()[0]
-            
+            self._sface_recognizer = cv2.FaceRecognizerSF.create(SFACE_MODEL_PATH, "")
             logger.info(
-                f"GlintR100 recogniser initialised: {os.path.basename(GLINTR100_MODEL_PATH)} "
-                f"| input: {inp.name} {inp.shape} {inp.type}"
+                f"SFace recogniser initialised: {os.path.basename(SFACE_MODEL_PATH)}"
             )
         except Exception as e:
-            logger.error(f"Failed to initialise GlintR100: {e}")
+            logger.error(f"Failed to initialise SFace: {e}")
             self._running = False
             return
 
@@ -294,7 +285,11 @@ class FaceRecognitionService(ServiceBase):
 
         detection_time = time.time() - start_time
 
-        # Convert YuNet [x, y, w, h, ...] → dlib CSS (top, right, bottom, left)
+        # Keep the RAW YuNet rows (bbox + 5 landmarks). SFace.alignCrop needs
+        # the landmarks, so we must NOT reduce detections to bbox-only tuples.
+        # face_locations (CSS top/right/bottom/left) is built in parallel purely
+        # for logging and the debug-frame overlay.
+        valid_faces = []
         face_locations = []
         if faces is not None:
             coord_limit = 10 * max(h, w)
@@ -304,10 +299,11 @@ class FaceRecognitionService(ServiceBase):
                     continue
                 if float(np.max(np.abs(arr[:14]))) > coord_limit:
                     continue
+                valid_faces.append(row)
                 x, y, fw, fh = arr[:4]
                 face_locations.append((int(y), int(x + fw), int(y + fh), int(x)))
 
-        if not face_locations:
+        if not valid_faces:
             logger.info(f"No faces detected (took {detection_time:.2f}s)")
             if SAVE_DEBUG_FRAMES:
                 self._frames_since_last_save += 1
@@ -319,44 +315,46 @@ class FaceRecognitionService(ServiceBase):
                     self._frames_since_last_save = 0
             return
 
-        logger.info(f"Detected {len(face_locations)} face(s) (took {detection_time:.2f}s)")
+        logger.info(f"Detected {len(valid_faces)} face(s) (took {detection_time:.2f}s)")
 
         if SAVE_DEBUG_FRAMES and self._frame_save_counter < self._max_debug_frames:
             self._save_debug_frame(rgb_frame, face_locations)
 
-        # Use the largest face
-        largest_face = max(
-            face_locations,
-            key=lambda loc: (loc[2] - loc[0]) * (loc[3] - loc[1]),
+        # Largest face by bbox area (cols 2,3 = w,h) — same selection rule the
+        # registration server uses, so probe and gallery pick the same face.
+        largest_idx = max(
+            range(len(valid_faces)),
+            key=lambda i: float(valid_faces[i][2]) * float(valid_faces[i][3]),
         )
-
-        top, right, bottom, left = largest_face
-        face_width = right - left
-        face_height = bottom - top
+        largest_row = valid_faces[largest_idx]
+        x, y, face_width, face_height = (
+            int(largest_row[0]), int(largest_row[1]),
+            int(largest_row[2]), int(largest_row[3]),
+        )
 
         if face_width < self.config.min_face_size or face_height < self.config.min_face_size:
             logger.info(f"Face too small: {face_width}x{face_height} (minimum: {self.config.min_face_size})")
             return
 
-        logger.info(f"Using face at ({left},{top})→({right},{bottom}), size: {face_width}x{face_height}")
+        logger.info(f"Using face at ({x},{y}), size: {face_width}x{face_height}")
 
-        # ── Embedding: GlintR100-INT8 (ArcFace, Glint360K) ────────────────
-        # Preprocessing identical to AuraFace / standard ArcFace:
-        #   • crop face region from RGB frame
-        #   • resize to 112×112
-        #   • normalise: (pixel - 127.5) / 127.5  →  range [-1, 1]
-        #   • layout: NCHW (1, 3, 112, 112)
-        #   • L2-normalise output vector before comparison / sending to API
-        logger.info("Encoding face with GlintR100-INT8...")
-        face_crop = rgb_frame[top:bottom, left:right]
-        face_resized = cv2.resize(face_crop, (112, 112))
-        face_input = (face_resized.astype(np.float32) - 127.5) / 127.5
-        face_input = np.transpose(face_input, (2, 0, 1))[np.newaxis, :]  # (1, 3, 112, 112)
+        # ── Embedding: SFace 128-D (OpenCV) ───────────────────────────────
+        # Mirrors am-master-server SFaceBackend.generate_embedding EXACTLY:
+        #   • alignCrop(BGR frame, raw YuNet row)  → 112×112 ArcFace template
+        #   • feature()                            → 128-D embedding
+        #   • L2-normalise                         → EUCLID == cosine ranking
+        # alignCrop must receive the BGR frame: registration decodes its gallery
+        # images with cv2.imdecode (BGR), so feeding RGB here would shift the
+        # embedding into a different colour space and break gallery comparison.
+        logger.info("Encoding face with SFace-128D...")
+        try:
+            aligned = self._sface_recognizer.alignCrop(bgr_frame, largest_row)
+            face_array = self._sface_recognizer.feature(aligned).flatten().astype(np.float32)
+        except Exception as e:
+            logger.error(f"SFace embedding failed: {e}", exc_info=True)
+            return
 
-        input_name = self._glintr100_session.get_inputs()[0].name
-        face_array = self._glintr100_session.run(None, {input_name: face_input})[0][0]
-
-        # L2-normalise (standard for ArcFace-family models)
+        # L2-normalise (EUCLID collection convention — matches registration)
         face_array = face_array / (np.linalg.norm(face_array) + 1e-8)
         face_vector = face_array.tolist()
 
@@ -374,7 +372,7 @@ class FaceRecognitionService(ServiceBase):
         the current visitor, otherwise forward to the server for identity lookup.
 
         Args:
-            face_vector: 512D face embedding (L2-normalised)
+            face_vector: 128D face embedding (L2-normalised)
             frame: BGR frame — saved to dataset once we have name + confidence
         """
         with self._person_lock:
@@ -425,7 +423,7 @@ class FaceRecognitionService(ServiceBase):
         its known-faces database and returns a name + confidence score.
 
         Args:
-            face_vector: 512D L2-normalised embedding vector
+            face_vector: 128D L2-normalised embedding vector
             frame: BGR frame — saved to dataset after we receive name + confidence
         """
         if not self._http_client:
@@ -437,6 +435,7 @@ class FaceRecognitionService(ServiceBase):
                 type="face",
                 n=self.config.n,
                 face_vector=face_vector,
+                model="sface",
             )
             request_data = request.model_dump()
 

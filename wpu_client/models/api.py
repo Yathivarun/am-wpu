@@ -10,10 +10,17 @@ class IdentifyRequest(BaseModel):
 
     type: str = Field(description="Type of identification (e.g., 'face')")
     n: int = Field(description="Number of results to return")
-    face_vector: str = Field(description="Comma-separated face vector string (128 floats for dlib)")
+    model: str = Field(
+        default="sface",
+        description="Recognition model gallery to query (sface=128D, auraface=512D). "
+        "Required to disambiguate 128D vectors server-side (dlib is also 128D).",
+    )
+    face_vector: str = Field(description="Comma-separated face vector string (128 floats for SFace)")
 
     @classmethod
-    def from_vector_list(cls, type: str, n: int, face_vector: list[float]) -> "IdentifyRequest":
+    def from_vector_list(
+        cls, type: str, n: int, face_vector: list[float], model: str = "sface"
+    ) -> "IdentifyRequest":
         """
         Create request from a list of floats.
 
@@ -21,12 +28,13 @@ class IdentifyRequest(BaseModel):
             type: Identification type
             n: Number of results
             face_vector: List of float values
+            model: Recognition model gallery to query (default "sface")
 
         Returns:
             IdentifyRequest instance with comma-separated string
         """
         vector_str = ",".join(str(v) for v in face_vector)
-        return cls(type=type, n=n, face_vector=vector_str)
+        return cls(type=type, n=n, model=model, face_vector=vector_str)
 
 
 class IdentifyResponse(BaseModel):

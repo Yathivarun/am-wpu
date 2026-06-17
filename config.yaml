@@ -23,8 +23,9 @@ services:
     enabled: true
     camera_id: 0
     n: 4
-    api_endpoint: "http://192.168.1.19:8000/api/v1/identify/"
-    wpu_endpoint: "http://192.168.1.19:8000/api/v1/wpu/images"
+    # Sandbox (ekanth docker-compose) host = 192.168.1.11, API published on 28000:8000
+    api_endpoint: "http://192.168.1.11:28000/api/v1/identify/"
+    wpu_endpoint: "http://192.168.1.11:28000/api/v1/wpu/images"
     detection_interval: 1  # seconds between captures
     min_face_size: 100  # minimum face size in pixels
     display_result: true  # show result on screen overlay
