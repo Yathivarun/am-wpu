@@ -189,7 +189,7 @@ class FaceRecognitionService(ServiceBase):
             if count == 0:
                 logger.warning(
                     "Diagnostic gallery is empty — no one will be recognised. "
-                    "Seed faces with: python tools/seed_face.py --name ... --gender ... --face ..."
+                    "Seed faces with: python tools/seed_face.py --name ... --face ..."
                 )
 
         # Run the recognition loop in a background thread
@@ -430,8 +430,8 @@ class FaceRecognitionService(ServiceBase):
     def _match_local_gallery(self, face_vector: list[float], frame: np.ndarray) -> None:
         """Diagnostic mode: identify against the local seeded gallery (no server).
 
-        On a match, tracks the person and emits person.detected carrying the
-        seeded gender, which the slideshow uses to pick face_stock_images/<gender>/.
+        On a match, tracks the person and emits person.detected carrying that
+        person's sketch_dir, which the slideshow uses to show their own sketches.
         """
         if not self._gallery or len(self._gallery) == 0:
             logger.info("Diagnostic gallery empty — no local match possible")
@@ -447,15 +447,15 @@ class FaceRecognitionService(ServiceBase):
 
         confidence = (1.0 - match.distance) * 100
         logger.info(
-            f"Local match: {match.entry.name} ({match.entry.gender}) "
-            f"dist={match.distance:.4f} conf={confidence:.1f}%"
+            f"Local match: {match.entry.name} "
+            f"dist={match.distance:.4f} conf={confidence:.1f}% sketches={match.entry.sketch_dir}"
         )
         self._update_person_tracking(
             visit_id=match.entry.slug,
             face_vector=face_vector,
             person_name=match.entry.name,
             confidence=confidence,
-            gender=match.entry.gender,
+            sketch_dir=match.entry.sketch_dir,
         )
         self._save_dataset_frame(frame, confidence=confidence, distance=match.distance)
 
@@ -555,7 +555,7 @@ class FaceRecognitionService(ServiceBase):
         face_vector: list[float],
         person_name: Optional[str],
         confidence: float,
-        gender: Optional[str] = None,
+        sketch_dir: Optional[str] = None,
     ) -> None:
         """
         Update person tracking state and emit appropriate events.
@@ -565,7 +565,7 @@ class FaceRecognitionService(ServiceBase):
             face_vector: Face vector to cache for subsequent local matching
             person_name: Person name from identification response
             confidence: Confidence score (0–100)
-            gender: "male"/"female" in diagnostic mode; None in server mode
+            sketch_dir: This person's local sketches dir (diagnostic mode); None in server mode
         """
         now = time.time()
 
@@ -585,7 +585,7 @@ class FaceRecognitionService(ServiceBase):
             self._current_person_name = person_name
             self._cached_face_vector = face_vector
             self._last_face_seen = now
-            self._emit_person_detected_event(visit_id, person_name, confidence, gender)
+            self._emit_person_detected_event(visit_id, person_name, confidence, sketch_dir)
 
     def _check_person_timeout(self) -> None:
         """Emit person.left if no face has been seen within the timeout window."""
@@ -602,12 +602,12 @@ class FaceRecognitionService(ServiceBase):
                 self._emit_person_left_event()
 
     def _emit_person_detected_event(
-        self, visit_id: str, person_name: str, confidence: float, gender: Optional[str] = None
+        self, visit_id: str, person_name: str, confidence: float, sketch_dir: Optional[str] = None
     ) -> None:
         """Emit person.detected event and start visit tracking.
 
-        `gender` is set in diagnostic mode and tells the slideshow which
-        face_stock_images/<gender>/ sketches to show.
+        `sketch_dir` is set in diagnostic mode and tells the slideshow which
+        per-person sketches folder (diagnostic_gallery/<slug>/sketches) to show.
         """
         self._visit_start_time = time.time()
         self._visit_confidence = confidence
@@ -618,10 +618,10 @@ class FaceRecognitionService(ServiceBase):
                 "visit_id": visit_id,
                 "person_name": person_name,
                 "confidence": confidence,
-                "gender": gender,
+                "sketch_dir": sketch_dir,
             },
         ))
-        logger.info(f"Emitted person.detected: {person_name} (visit_id: {visit_id}, gender: {gender})")
+        logger.info(f"Emitted person.detected: {person_name} (visit_id: {visit_id}, sketches: {sketch_dir})")
 
     def _emit_person_left_event(self) -> None:
         """Emit person.left event, write visit log row, and clear tracking state."""

@@ -41,8 +41,9 @@ class SlideshowService(ServiceBase):
             event_bus: Event bus for inter-service communication
             wpu_endpoint: WPU API endpoint for fetching visitor images
             face_service: Optional FaceRecognitionService for camera preview
-            diagnostic_mode: If True, show local face_stock_images/<gender>/ sketches
-                on recognition instead of fetching visitor images from the server.
+            diagnostic_mode: If True, show the matched person's own local sketches
+                (diagnostic_gallery/<slug>/sketches/) on recognition instead of
+                fetching visitor images from the server.
         """
         super().__init__("slideshow")
         self.config = config
@@ -116,17 +117,17 @@ class SlideshowService(ServiceBase):
         """Handle person detected event - fetch visitor images and switch mode."""
         visit_id = event.data.get("visit_id")
         person_name = event.data.get("person_name", "Unknown")
-        gender = event.data.get("gender")
+        sketch_dir = event.data.get("sketch_dir")
 
         if not visit_id:
             logger.warning("person.detected event missing visit_id")
             return
 
-        logger.info(f"Person detected: {person_name} (visit_id: {visit_id}, gender: {gender})")
+        logger.info(f"Person detected: {person_name} (visit_id: {visit_id}, sketches: {sketch_dir})")
 
         # Fetch WPU images and switch mode
         if self._app:
-            self._app.switch_to_visitor_mode(visit_id, person_name, gender)
+            self._app.switch_to_visitor_mode(visit_id, person_name, sketch_dir)
 
     def _on_person_left(self, event: Event) -> None:
         """Handle person left event - switch back to stock images."""
@@ -489,35 +490,39 @@ class SlideshowApp(Gtk.Application):
             logger.error(f"Failed to fetch WPU images for visit {visit_id}: {e}")
             return []
 
-    def _load_face_sketches(self, gender: str) -> list[str]:
-        """Diagnostic mode: local face-swap sketches for a gender.
+    def _load_person_sketches(self, sketch_dir: str) -> list[str]:
+        """Diagnostic mode: this person's own face-swap sketches.
 
-        Reads <face_sketch_directory>/<gender>/* (e.g. face_stock_images/male/).
+        Reads <sketch_dir>/* (i.e. diagnostic_gallery/<slug>/sketches/).
+        Returns [] if the folder is missing or empty — e.g. the person is seeded
+        but their face-swap render hasn't been dropped in yet.
         """
-        if gender not in ("male", "female"):
-            logger.warning(f"Diagnostic: invalid/missing gender {gender!r}; no sketches to show")
+        if not sketch_dir or not os.path.isdir(sketch_dir):
+            logger.warning(f"Diagnostic: no sketches folder for this person ({sketch_dir!r})")
             return []
-        base = os.path.join(self.config.face_sketch_directory, gender)
         files: list[str] = []
         for ext in self.config.image_extensions:
-            files.extend(glob.glob(os.path.join(base, ext)))
+            files.extend(glob.glob(os.path.join(sketch_dir, ext)))
         files.sort(key=lambda p: os.path.basename(p).lower())
-        logger.info(f"Diagnostic: loaded {len(files)} {gender} sketch(es) from {base}")
+        logger.info(f"Diagnostic: loaded {len(files)} sketch(es) from {sketch_dir}")
         return files
 
-    def switch_to_visitor_mode(self, visit_id: str, person_name: str, gender: str = None):
+    def switch_to_visitor_mode(self, visit_id: str, person_name: str, sketch_dir: str = None):
         """Switch to visitor-specific images mode."""
-        logger.info(f"Switching to visitor mode: {person_name} (visit_id: {visit_id}, gender: {gender})")
+        logger.info(f"Switching to visitor mode: {person_name} (visit_id: {visit_id}, sketches: {sketch_dir})")
 
-        # Diagnostic mode shows local gender-specific sketches; normal mode
+        # Diagnostic mode shows this person's own local sketches; normal mode
         # fetches this visitor's generated images from the server.
         if self.service.diagnostic_mode:
-            visitor_images = self._load_face_sketches(gender)
+            visitor_images = self._load_person_sketches(sketch_dir)
         else:
             visitor_images = self._fetch_visitor_images(visit_id)
 
         if not visitor_images:
-            logger.warning(f"No images found for visit {visit_id} (gender={gender}), staying in stock mode")
+            logger.warning(
+                f"No sketches to show for {person_name} (visit_id: {visit_id}); "
+                f"staying on stock images"
+            )
             return
 
         self.visitor_images = visitor_images

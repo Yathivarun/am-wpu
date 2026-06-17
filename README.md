@@ -12,39 +12,41 @@ sandbox, or for a self-contained demo). Toggle with `--diagnostic` (or
 `diagnostic_mode: true` under `face_recognition` in `config.yaml`).
 
 **Flow:**
-1. **Seed** a known person with `tools/seed_face.py --name <N> --gender <male|female> --face <img>`.
+1. **Seed** a known person with `tools/seed_face.py --name <N> --face <img> [--sketches <dir|img>]`.
    The same YuNet → SFace pipeline generates a 128-D embedding, saved to
-   `diagnostic_gallery/<slug>/embedding.npy` + `meta.json` (`{name, gender}`).
+   `diagnostic_gallery/<slug>/embedding.npy` + `meta.json`, alongside a per-person
+   `sketches/` folder.
 2. At runtime the face service **matches live faces against the local gallery**
    by cosine distance (`diagnostic_match_threshold`, default `0.5`) — no `/identify`
    call, no network.
-3. On a match it emits `person.detected` carrying the person's **gender**, and the
-   slideshow shows that gender's face-swap sketches from
-   `face_stock_images/<gender>/`. No face → stock images, as usual.
+3. On a match it emits `person.detected` carrying that person's `sketch_dir`, and the
+   slideshow shows **that individual's own** sketches from
+   `diagnostic_gallery/<slug>/sketches/`. No face → stock images, as usual.
 
-**Sketch selection is by gender, not per person** (Option A): the seed stores each
-person's gender, which picks `face_stock_images/male/` or `…/female/`. Everyone of
-the same gender sees the same sketch set — matching the supplied assets (10 sketches
-split 5 male / 5 female). Chosen because diagnostic mode seeds *known* people, so the
-gender is known at seed time — zero extra models, zero runtime misclassification.
+**Sketches are per-person**, not by gender: each seeded person's face-swap sketch(es)
+live in their own `sketches/` folder and are shown only when *that* person is
+recognised. The render (the actual face-swap) is produced externally and is decoupled
+from the WPU — sketches can be dropped into `sketches/` at seed time (`--sketches`) or
+later when the render is delivered, with no re-seed. If the folder is empty (sketch not
+ready yet), recognition still fires but the slideshow stays on stock images.
 
 **New files:**
 - `wpu_client/services/face_recognition/sface_embedder.py` — camera-free YuNet+SFace
   embedder (no `picamera2`), the single source of truth shared by the seed tool and
   verified byte-identical to the live service path.
 - `wpu_client/services/face_recognition/diagnostic_gallery.py` — loads seeded entries
-  and matches by cosine distance.
-- `tools/seed_face.py` — seed a face + gender into the local gallery.
+  (embedding + per-person `sketches/`) and matches by cosine distance.
+- `tools/seed_face.py` — seed a face (and optionally sketches) into the local gallery.
 
 **Other changes:**
 - `face_service.py` — diagnostic branch (`_match_local_gallery`) replaces the server
-  call; `gender` plumbed through `person.detected`. Server mode is unchanged.
-- `slideshow_service.py` — in diagnostic mode, visitor mode loads local
-  `face_stock_images/<gender>/` sketches instead of fetching signed URLs.
-- Config: `diagnostic_mode`, `diagnostic_gallery_dir`, `diagnostic_match_threshold`,
-  `face_sketch_directory`.
-- `.gitignore` — `face_stock_images/` and `diagnostic_gallery/` are gitignored
-  (heavy assets / local data; deploy to the Pi separately like the model files).
+  call; the matched person's `sketch_dir` is plumbed through `person.detected`.
+  Server mode is unchanged.
+- `slideshow_service.py` — in diagnostic mode, visitor mode loads the matched person's
+  local `sketches/` folder instead of fetching signed URLs.
+- Config: `diagnostic_mode`, `diagnostic_gallery_dir`, `diagnostic_match_threshold`.
+- `.gitignore` — `diagnostic_gallery/` (and the legacy `face_stock_images/`) are
+  gitignored (local data / heavy assets; deploy to the Pi separately like the models).
 
 **Validated off-Pi:** seed → gallery → match works end-to-end, and the seed embedding
 is byte-identical to the live SFace probe (same first-3 values as the Stage-A harness),

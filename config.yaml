@@ -18,7 +18,6 @@ services:
     background_color: "black"
     scale_mode: "fill"  # fill, fit, crop
     sort_mode: "numeric"  # numeric, alphabetical
-    face_sketch_directory: "face_stock_images"  # diagnostic: <dir>/male, <dir>/female
 
   face_recognition:
     enabled: true

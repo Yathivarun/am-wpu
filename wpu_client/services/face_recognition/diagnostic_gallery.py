@@ -5,11 +5,13 @@ A gallery is a directory of per-person sub-folders seeded by `tools/seed_face.py
     diagnostic_gallery/
       ekan/
         embedding.npy        # SFace 128-D L2-normalised vector
-        meta.json            # {"name": "Ekan", "gender": "male"}
+        meta.json            # {"name": "Ekan"}
+        sketches/            # this person's face-swap sketch image(s)
+          01.png ...
 
 At runtime the face service matches a live probe embedding against these entries
-by cosine distance — no server, no Triton. The matched person's `gender` selects
-which `face_stock_images/<gender>/` sketches the slideshow shows.
+by cosine distance — no server, no Triton. On a match, the slideshow shows that
+person's OWN sketches from `<entry>/sketches/`.
 """
 
 import json
@@ -25,20 +27,22 @@ logger = logging.getLogger(__name__)
 
 EMBEDDING_FILE = "embedding.npy"
 META_FILE = "meta.json"
+SKETCHES_DIR = "sketches"
 
 
 @dataclass
 class GalleryEntry:
-    slug: str          # folder name / local identifier (used as visit_id)
+    slug: str           # folder name / local identifier (used as visit_id)
     name: str
-    gender: str        # "male" | "female"
     vector: np.ndarray  # 128-D L2-normalised
+    sketch_dir: str     # diagnostic_gallery/<slug>/sketches — this person's sketches
+    gender: Optional[str] = None  # optional metadata; not used for display
 
 
 @dataclass
 class Match:
     entry: GalleryEntry
-    distance: float    # cosine distance (0 = identical)
+    distance: float     # cosine distance (0 = identical)
 
 
 class DiagnosticGallery:
@@ -68,15 +72,13 @@ class DiagnosticGallery:
                 vec = np.load(emb_path).astype(np.float32).flatten()
                 with open(meta_path) as f:
                     meta = json.load(f)
-                gender = str(meta.get("gender", "")).lower()
-                if gender not in ("male", "female"):
-                    logger.warning("Skipping '%s' — gender must be male/female, got %r", slug, gender)
-                    continue
+                gender = meta.get("gender")
                 self._entries.append(GalleryEntry(
                     slug=slug,
                     name=meta.get("name", slug),
-                    gender=gender,
                     vector=vec,
+                    sketch_dir=os.path.join(person_dir, SKETCHES_DIR),
+                    gender=str(gender).lower() if gender else None,
                 ))
             except Exception as e:
                 logger.error("Failed to load gallery entry '%s': %s", slug, e)
@@ -84,7 +86,7 @@ class DiagnosticGallery:
         logger.info(
             "Diagnostic gallery loaded: %d person(s) from %s [%s]",
             len(self._entries), self.gallery_dir,
-            ", ".join(f"{e.name}/{e.gender}" for e in self._entries) or "none",
+            ", ".join(e.name for e in self._entries) or "none",
         )
         return len(self._entries)
 

@@ -21,9 +21,6 @@ class SlideshowConfig(BaseModel):
     background_color: str = "black"
     scale_mode: str = "fill"  # fill, fit, crop
     sort_mode: str = "numeric"  # numeric, alphabetical
-    # Diagnostic mode: face-swap sketches shown on recognition, split by gender
-    # into <face_sketch_directory>/male and <face_sketch_directory>/female.
-    face_sketch_directory: str = "face_stock_images"
 
 
 class FaceRecognitionConfig(BaseModel):

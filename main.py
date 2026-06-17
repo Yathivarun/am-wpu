@@ -95,7 +95,7 @@ def main():
         "--diagnostic",
         action="store_true",
         help="Offline diagnostic mode: recognise faces against the local seeded "
-             "gallery (no server) and show local face_stock_images/<gender>/ sketches",
+             "gallery (no server) and show each person's own local sketches",
     )
     args = parser.parse_args()
 
