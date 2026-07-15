@@ -1,0 +1,30 @@
+# PENDING ON-DEVICE CONFIRMATION (CLEANUP_PLAN.md UNCERTAIN #5):
+#   - WorkingDirectory/ExecStart assume the release unzips to /home/dreamvu/wpu_client —
+#     confirm the actual folder name on the Pi and adjust if different.
+#   - Environment= assumes a Wayland session (XDG_SESSION_TYPE=wayland). If the kiosk
+#     runs X11 instead, replace with:
+#       Environment=DISPLAY=:0
+#       Environment=XAUTHORITY=/home/dreamvu/.Xauthority
+#   - XDG_RUNTIME_DIR assumes uid 1000 for `dreamvu`; confirm with `id -u dreamvu`.
+#   - Confirm `loginctl show-user dreamvu -p Linger` is Linger=yes so the graphical
+#     session (and this unit, on graphical.target) comes up at boot without a login.
+# See CLEANUP_PLAN.md §7 for the exact commands to run on the Pi before enabling this.
+
+[Unit]
+Description=WPU slideshow — server mode (online recognition + slideshow)
+After=network-online.target
+Wants=network-online.target
+Conflicts=slideshow-diagnostic.service
+
+[Service]
+Type=simple
+User=dreamvu
+WorkingDirectory=/home/dreamvu/wpu_client
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStart=/home/dreamvu/wpu_client/.venv/bin/python main.py --service all
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

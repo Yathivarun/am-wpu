@@ -7,7 +7,6 @@ requires-python = ">=3.11"
 dependencies = [
     "pygobject==3.42.2",
     "pyyaml",
-    "face_recognition",
     "opencv-python",
     "numpy",
     "httpx",
@@ -16,4 +15,5 @@ dependencies = [
     "scipy",
     "picamera2",
     "onnxruntime>=1.26.0",
+    "psutil",
 ]

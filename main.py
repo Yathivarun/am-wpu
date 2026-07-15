@@ -83,7 +83,7 @@ def main():
     )
     parser.add_argument(
         "--config",
-        help="Path to configuration file (default: config.yaml)",
+        help="Path to configuration file (default: config/config.yaml)",
     )
     parser.add_argument(
         "--log-level",

@@ -22,6 +22,22 @@ from wpu_client.utils.http import HTTPClient
 logger = logging.getLogger(__name__)
 
 
+def _natural_key(path: str):
+    """Sort key for `sort_mode: numeric` that never compares int to str.
+
+    Digit-named files (e.g. "1.png") sort first, numerically; everything else
+    sorts after, alphabetically. A mixed directory (numeric stock images next
+    to a non-numeric name) previously crashed with `TypeError: '<' not
+    supported between instances of 'int' and 'str'` because the old key
+    returned an int for one file and a str for another.
+    """
+    name = os.path.splitext(os.path.basename(path))[0]
+    # (0, number) sorts numeric names first & numerically; (1, name) sorts the
+    # rest — the differing first element means Python never compares the
+    # second (int vs str) across groups.
+    return (0, int(name)) if name.isdigit() else (1, name.lower())
+
+
 class SlideshowService(ServiceBase):
     """
     GTK4-based slideshow service.
@@ -42,7 +58,7 @@ class SlideshowService(ServiceBase):
             wpu_endpoint: WPU API endpoint for fetching visitor images
             face_service: Optional FaceRecognitionService for camera preview
             diagnostic_mode: If True, show the matched person's own local sketches
-                (diagnostic_gallery/<slug>/sketches/) on recognition instead of
+                (data/embeddings/<slug>/sketches/) on recognition instead of
                 fetching visitor images from the server.
         """
         super().__init__("slideshow")
@@ -59,13 +75,13 @@ class SlideshowService(ServiceBase):
         # Mode tracking
         self._mode: str = "stock"  # "stock" or "visitor"
         self._mode_lock = threading.Lock()
-        self._current_visit_id: Optional[str] = None
+        self._current_registration_id: Optional[str] = None
 
         # HTTP client for fetching WPU images
         self._http_client: Optional[HTTPClient] = None
 
         # Subscribe to events
-        event_bus.subscribe("face.recognized", self._on_face_recognized)
+        event_bus.subscribe("faces.recognized", self._on_faces_recognized)
         event_bus.subscribe("person.detected", self._on_person_detected)
         event_bus.subscribe("person.left", self._on_person_left)
 
@@ -101,42 +117,52 @@ class SlideshowService(ServiceBase):
             self._http_client.close()
             self._http_client = None
 
-    def _on_face_recognized(self, event: Event) -> None:
-        """Handle face recognition event - show overlay."""
-        person_name = event.data.get("person_name", "Unknown")
-        confidence = event.data.get("confidence", 0.0)
+    def _on_faces_recognized(self, event: Event) -> None:
+        """Handle faces.recognized event - show one overlay line per currently
+        tracked face (welcome / live match% / "Not recognized"), or clear the
+        overlay when nobody is tracked."""
+        lines = event.data.get("lines", [])
         hide_delay = event.data.get("hide_delay", 3)
 
         with self._overlay_lock:
-            self._overlay_text = f"Identified: {person_name} ({confidence:.1f}%)"
-            self._overlay_hide_time = time.time() + hide_delay
+            if lines:
+                self._overlay_text = "\n".join(lines)
+                self._overlay_hide_time = time.time() + hide_delay
+            else:
+                self._overlay_text = None
 
-        logger.info(f"Displaying overlay: {self._overlay_text}")
+        logger.info(f"Displaying overlay: {lines}")
 
     def _on_person_detected(self, event: Event) -> None:
         """Handle person detected event - fetch visitor images and switch mode."""
-        visit_id = event.data.get("visit_id")
+        registration_id = event.data.get("registration_id")
         person_name = event.data.get("person_name", "Unknown")
         sketch_dir = event.data.get("sketch_dir")
 
-        if not visit_id:
-            logger.warning("person.detected event missing visit_id")
+        if not registration_id:
+            logger.warning("person.detected event missing registration_id")
             return
 
-        logger.info(f"Person detected: {person_name} (visit_id: {visit_id}, sketches: {sketch_dir})")
+        logger.info(f"Person detected: {person_name} (registration_id: {registration_id}, sketches: {sketch_dir})")
 
         # Fetch WPU images and switch mode
         if self._app:
-            self._app.switch_to_visitor_mode(visit_id, person_name, sketch_dir)
+            self._app.switch_to_visitor_mode(
+                registration_id, person_name, sketch_dir,
+                unrecognized=event.data.get("unrecognized", False),
+            )
 
     def _on_person_left(self, event: Event) -> None:
-        """Handle person left event - switch back to stock images."""
+        """Handle person left event - finish their sketch cycle, then revert."""
         person_name = event.data.get("person_name", "Unknown")
         logger.info(f"Person left: {person_name}")
 
-        # Switch back to stock mode
+        # Don't cut the slideshow short: keep showing the person's remaining
+        # sketches and switch back to stock only once the full cycle is done.
+        # If someone else is recognised meanwhile, person.detected switches
+        # to their sketches immediately.
         if self._app:
-            self._app.switch_to_stock_mode()
+            self._app.finish_visitor_cycle_then_stock()
 
     def get_overlay_text(self) -> Optional[str]:
         """Get current overlay text if it should be displayed."""
@@ -158,6 +184,9 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         self.service = service
         self.current_index = 0
         self.mode = mode  # "stock" or "visitor"
+        # Set after the person leaves (visitor mode only): keep advancing
+        # through their sketches and revert to stock once the cycle wraps.
+        self.finish_cycle_then_stock = False
 
         # Set up full screen or windowed
         if config.full_screen:
@@ -173,11 +202,8 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         self.picture.set_vexpand(True)
         self.picture.set_hexpand(True)
 
-        # Content fit is set dynamically per image in load_image() so that
-        # portrait images use COVER (fills screen, clips edges, no stretch)
-        # while landscape images respect the operator-configured scale_mode.
-        # Set a safe default until the first image loads.
-        self.picture.set_content_fit(Gtk.ContentFit.CONTAIN)
+        # Set default to FILL for anamorphic stretching
+        self.picture.set_content_fit(Gtk.ContentFit.FILL)
 
         # Create overlay label for face recognition results
         self.overlay_label = Gtk.Label()
@@ -185,17 +211,34 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         self.overlay_label.set_visible(False)
 
         # --- Camera preview ---
+        # Size is enforced by downscaling the frame itself (see
+        # update_camera_preview): Gtk.Picture's natural size is its paintable's
+        # size, so a size request smaller than the texture has no effect.
+        # getattr fallbacks keep this working if SlideshowConfig lacks the keys.
+        self.preview_size = (
+            getattr(config, "camera_preview_width", 160),
+            getattr(config, "camera_preview_height", 120),
+        )
+        self.preview_enabled = getattr(config, "camera_preview_enabled", True)
         self.camera_preview = Gtk.Picture()
-        self.camera_preview.set_size_request(320, 240)
         self.camera_preview.set_content_fit(Gtk.ContentFit.CONTAIN)
         self.camera_preview.set_visible(False)  # hidden until first frame arrives
 
-        # Stack preview + label in a vertical box — both anchored top-left
+        # Stack preview + label in a vertical box, anchored to the configured
+        # corner: top-left, top-right, bottom-left, or bottom-right.
+        position = getattr(config, "camera_preview_position", "bottom-left")
+        vpos, _, hpos = position.partition("-")
         self.preview_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self.preview_box.set_halign(Gtk.Align.START)
-        self.preview_box.set_valign(Gtk.Align.START)
-        self.preview_box.set_margin_start(16)
-        self.preview_box.set_margin_top(16)
+        self.preview_box.set_halign(Gtk.Align.END if hpos == "right" else Gtk.Align.START)
+        self.preview_box.set_valign(Gtk.Align.END if vpos == "bottom" else Gtk.Align.START)
+        if hpos == "right":
+            self.preview_box.set_margin_end(16)
+        else:
+            self.preview_box.set_margin_start(16)
+        if vpos == "bottom":
+            self.preview_box.set_margin_bottom(16)
+        else:
+            self.preview_box.set_margin_top(16)
         self.preview_box.append(self.camera_preview)
         self.preview_box.append(self.overlay_label)
 
@@ -249,7 +292,9 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         self.overlay_timeout_id = GLib.timeout_add(100, self.update_overlay)
 
         # Start camera preview update timer — 100ms refresh (~10fps, looks live)
-        self.preview_timeout_id = GLib.timeout_add(100, self.update_camera_preview)
+        self.preview_timeout_id = None
+        if self.preview_enabled:
+            self.preview_timeout_id = GLib.timeout_add(100, self.update_camera_preview)
 
     def set_images(self, new_images: list[str], mode: str):
         """
@@ -262,6 +307,7 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         self.image_files = new_images
         self.mode = mode
         self.current_index = 0
+        self.finish_cycle_then_stock = False
 
         if self.image_files:
             self.load_image(0)
@@ -270,30 +316,15 @@ class SlideshowWindow(Gtk.ApplicationWindow):
 
     def _get_content_fit_for_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf) -> Gtk.ContentFit:
         """
-        Determine the appropriate ContentFit mode based on image orientation.
-
-        Portrait images (taller than wide) are displayed with COVER so they fill
-        the full TV screen without any stretching — the narrow sides are cropped
-        minimally.  Landscape images use the operator-configured scale_mode so
-        their existing appearance is unchanged.
-
-        Args:
-            pixbuf: The loaded GdkPixbuf whose dimensions we inspect.
-
-        Returns:
-            Gtk.ContentFit value to apply to self.picture.
+        Original logic kept intact but bypassed in load_image to support anamorphic scaling.
         """
         width = pixbuf.get_width()
         height = pixbuf.get_height()
         is_portrait = height > width
 
         if is_portrait:
-            # COVER fills the screen while preserving aspect ratio; any overflow
-            # is clipped rather than stretched, which is the correct TV behaviour
-            # for a portrait photo.
             return Gtk.ContentFit.CONTAIN
 
-        # Landscape — honour the operator's configured preference
         scale_mode = self.config.scale_mode
         if scale_mode == "fill":
             return Gtk.ContentFit.FILL
@@ -328,10 +359,18 @@ class SlideshowWindow(Gtk.ApplicationWindow):
                 # Load from local file into a pixbuf so we can inspect dimensions
                 pixbuf = GdkPixbuf.Pixbuf.new_from_file(image_path)
 
-            # Adjust content-fit dynamically based on whether the image is
-            # portrait or landscape before converting to a texture.
-            content_fit = self._get_content_fit_for_pixbuf(pixbuf)
-            self.picture.set_content_fit(content_fit)
+            # =================================================================
+            # ANAMORPHIC DISTORTION SCRIPT
+            # 1. Forcefully stretch the loaded pixbuf to 1920x1080 natively in GTK.
+            #    This ignores aspect ratio and pre-distorts the 6:7 image so the 
+            #    hardware display squishing it cancels it out perfectly.
+            # =================================================================
+            pixbuf = pixbuf.scale_simple(1920, 1080, GdkPixbuf.InterpType.BILINEAR)
+            
+            # 2. Force FILL so GTK maps our newly stretched 1920x1080 image perfectly
+            #    1:1 to the 1080p window without adding any internal letterboxing.
+            self.picture.set_content_fit(Gtk.ContentFit.FILL)
+            # =================================================================
 
             texture = Gdk.Texture.new_for_pixbuf(pixbuf)
             self.picture.set_paintable(texture)
@@ -339,7 +378,7 @@ class SlideshowWindow(Gtk.ApplicationWindow):
 
             orientation = "portrait" if pixbuf.get_height() > pixbuf.get_width() else "landscape"
             logger.debug(
-                f"Displaying ({orientation}, fit={content_fit.value_nick}): "
+                f"Displaying ({orientation}, anamorphic stretch applied): "
                 f"{os.path.basename(image_path) if not image_path.startswith('http') else 'visitor image'}"
             )
         except Exception as e:
@@ -352,6 +391,13 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         if not self.image_files:
             return True
         next_index = (self.current_index + 1) % len(self.image_files)
+        if self.mode == "visitor" and self.finish_cycle_then_stock and next_index == 0:
+            # The departed person's sketch cycle just completed — revert now.
+            self.finish_cycle_then_stock = False
+            app = self.get_application()
+            if app:
+                app.switch_to_stock_mode()
+            return True
         self.load_image(next_index)
         return True  # Keep timer running
 
@@ -380,7 +426,7 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         if face_service is None:
             return True  # No face service wired up — skip silently
 
-        frame = face_service.get_preview_frame()
+        frame = face_service.get_preview_frame(max_size=self.preview_size)
         if frame is None:
             return True  # No frame yet
 
@@ -459,41 +505,35 @@ class SlideshowApp(Gtk.Application):
 
         # Sort images based on configuration
         if self.config.sort_mode == "numeric":
-            image_files.sort(
-                key=lambda p: (
-                    int(os.path.splitext(os.path.basename(p))[0])
-                    if os.path.splitext(os.path.basename(p))[0].isdigit()
-                    else os.path.basename(p)
-                )
-            )
+            image_files.sort(key=_natural_key)
         else:
             image_files.sort(key=lambda p: os.path.basename(p).lower())
 
         logger.info(f"Loaded {len(image_files)} stock images from {image_dir}")
         return image_files
 
-    def _fetch_visitor_images(self, visit_id: str) -> list[str]:
+    def _fetch_visitor_images(self, registration_id: str) -> list[str]:
         """Fetch visitor WPU images from the API."""
         try:
-            logger.info(f"Fetching WPU images for visit_id: {visit_id}")
+            logger.info(f"Fetching WPU images for registration_id: {registration_id}")
             response_data = self.http_client.get(
                 self.wpu_endpoint,
-                params={"visit_uuid": visit_id}
+                params={"registration_id": registration_id}
             )
 
             # The API returns a dict with "signed_urls" key containing list of URLs
             images = response_data.get("signed_urls", [])
-            logger.info(f"Fetched {len(images)} WPU images for visit {visit_id}")
+            logger.info(f"Fetched {len(images)} WPU images for visit {registration_id}")
             return images
 
         except Exception as e:
-            logger.error(f"Failed to fetch WPU images for visit {visit_id}: {e}")
+            logger.error(f"Failed to fetch WPU images for visit {registration_id}: {e}")
             return []
 
     def _load_person_sketches(self, sketch_dir: str) -> list[str]:
         """Diagnostic mode: this person's own face-swap sketches.
 
-        Reads <sketch_dir>/* (i.e. diagnostic_gallery/<slug>/sketches/).
+        Reads <sketch_dir>/* (i.e. data/embeddings/<slug>/sketches/).
         Returns [] if the folder is missing or empty — e.g. the person is seeded
         but their face-swap render hasn't been dropped in yet.
         """
@@ -507,20 +547,25 @@ class SlideshowApp(Gtk.Application):
         logger.info(f"Diagnostic: loaded {len(files)} sketch(es) from {sketch_dir}")
         return files
 
-    def switch_to_visitor_mode(self, visit_id: str, person_name: str, sketch_dir: str = None):
-        """Switch to visitor-specific images mode."""
-        logger.info(f"Switching to visitor mode: {person_name} (visit_id: {visit_id}, sketches: {sketch_dir})")
+    def switch_to_visitor_mode(self, registration_id: str, person_name: str,
+                               sketch_dir: str = None, unrecognized: bool = False):
+        """Switch to visitor-specific images mode.
+
+        `unrecognized` marks the unknown-face preview: a random person's
+        sketches are shown with a 'Not recognized' overlay instead of a welcome.
+        """
+        logger.info(f"Switching to visitor mode: {person_name} (registration_id: {registration_id}, sketches: {sketch_dir})")
 
         # Diagnostic mode shows this person's own local sketches; normal mode
         # fetches this visitor's generated images from the server.
         if self.service.diagnostic_mode:
             visitor_images = self._load_person_sketches(sketch_dir)
         else:
-            visitor_images = self._fetch_visitor_images(visit_id)
+            visitor_images = self._fetch_visitor_images(registration_id)
 
         if not visitor_images:
             logger.warning(
-                f"No sketches to show for {person_name} (visit_id: {visit_id}); "
+                f"No sketches to show for {person_name} (registration_id: {registration_id}); "
                 f"staying on stock images"
             )
             return
@@ -535,8 +580,27 @@ class SlideshowApp(Gtk.Application):
 
         # Update overlay to show mode change
         with self.service._overlay_lock:
-            self.service._overlay_text = f"Welcome {person_name}!"
+            self.service._overlay_text = (
+                "Not recognized" if unrecognized else f"Welcome {person_name}!"
+            )
             self.service._overlay_hide_time = time.time() + 3
+
+    def finish_visitor_cycle_then_stock(self):
+        """Person left: let their remaining sketches display; the window
+        reverts to stock when the visitor cycle wraps (see next_image)."""
+        def _flag():
+            win = self.current_window
+            if win and win.mode == "visitor":
+                win.finish_cycle_then_stock = True
+                logger.info(
+                    "Person left — finishing their sketch cycle before "
+                    "reverting to stock images"
+                )
+            return False  # one-shot idle callback
+
+        # Called from the face-recognition thread; the flag is read by GTK
+        # main-loop timers, so marshal the write onto the main loop too.
+        GLib.idle_add(_flag)
 
     def switch_to_stock_mode(self):
         """Switch back to stock images mode."""

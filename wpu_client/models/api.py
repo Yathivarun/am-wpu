@@ -13,7 +13,8 @@ class IdentifyRequest(BaseModel):
     model: str = Field(
         default="sface",
         description="Recognition model gallery to query (sface=128D, auraface=512D). "
-        "Required to disambiguate 128D vectors server-side (dlib is also 128D).",
+        "Required to disambiguate which 128D gallery a probe vector belongs to, "
+        "since more than one 128D embedding space exists server-side.",
     )
     face_vector: str = Field(description="Comma-separated face vector string (128 floats for SFace)")
 
@@ -40,8 +41,9 @@ class IdentifyRequest(BaseModel):
 class IdentifyResponse(BaseModel):
     """Response model from the identify API endpoint."""
 
-    visit_id: str | None = None
+    registration_id: str | None = None
     name: str | None = None
+    preferred_name: str | None = None
     email: str | None = None
     phone_number: str | None = None
     distance: float | None = None
@@ -63,9 +65,11 @@ class IdentifyResponse(BaseModel):
 class WPULImagesResponse(BaseModel):
     """Response model for WPU images endpoint."""
 
-    images: list[str] = Field(default_factory=list, description="List of signed image URLs")
+    signed_urls: list[str] = Field(
+        default_factory=list, description="List of signed image URLs"
+    )
 
     @property
     def has_images(self) -> bool:
         """Check if there are any images."""
-        return len(self.images) > 0
+        return len(self.signed_urls) > 0

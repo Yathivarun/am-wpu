@@ -1,0 +1,7 @@
+{
+  "name": "Varun",
+  "models": [
+    "mobilenet",
+    "sface"
+  ]
+}

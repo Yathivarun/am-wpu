@@ -1,3 +1,4 @@
+
 """Configuration management for WPU Client."""
 
 import os
@@ -7,6 +8,8 @@ from typing import Any, Optional
 import yaml
 from pydantic import BaseModel, Field
 
+from wpu_client.paths import CONFIG_DIR
+
 
 class SlideshowConfig(BaseModel):
     """Configuration for slideshow service."""
@@ -14,13 +17,13 @@ class SlideshowConfig(BaseModel):
     enabled: bool = True
     full_screen: bool = True
     advance_time: int = 3
-    image_directory: str = "stock_images"
+    image_directory: str = "data/stock_images"
     image_extensions: list[str] = Field(
         default_factory=lambda: ["*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.webp"]
     )
     background_color: str = "black"
     scale_mode: str = "fill"  # fill, fit, crop
-    sort_mode: str = "numeric"  # numeric, alphabetical
+    sort_mode: str = "alphabetical"  # numeric, alphabetical
 
 
 class FaceRecognitionConfig(BaseModel):
@@ -29,6 +32,10 @@ class FaceRecognitionConfig(BaseModel):
     enabled: bool = True
     camera_id: int = 0
     n: int = 3
+    # Recognition model: "sface" (OpenCV 128-D, light, default) or "mobilenet"
+    # (distilled MobileFaceNet 512-D → server's auraface gallery). Selects both
+    # the on-device embedder and the gallery the identify request queries.
+    model: str = "sface"
     api_endpoint: str = "http://localhost:8000/api/v1/identify/"
     # api_endpoint: str = "http://10.2.135.25:8000/api/v1/identify"
     wpu_endpoint: str = "http://localhost:8000/api/v1/wpu/images"
@@ -39,9 +46,9 @@ class FaceRecognitionConfig(BaseModel):
     person_timeout: int = 10  # seconds without face before person is considered left
 
     # Diagnostic (offline) mode — match faces against a LOCAL seeded gallery
-    # instead of the server /identify API. See tools/seed_face.py.
+    # instead of the server /identify API. See scripts/seed_face.py.
     diagnostic_mode: bool = False
-    diagnostic_gallery_dir: str = "diagnostic_gallery"
+    diagnostic_gallery_dir: str = "data/embeddings"
     # Cosine-distance gate for a local match. For unit vectors cosine_distance =
     # L2^2 / 2, so the server's L2 threshold of 1.08 corresponds to ~0.58 here;
     # 0.5 is a slightly stricter default. Tune per camera/lighting.
@@ -73,7 +80,7 @@ class Settings(BaseModel):
             Settings instance with values from file or defaults.
         """
         if config_path is None:
-            config_path = Path.cwd() / "config.yaml"
+            config_path = CONFIG_DIR / "config.yaml"
         else:
             config_path = Path(config_path)
 
@@ -103,15 +110,16 @@ class Settings(BaseModel):
                     "enabled": True,
                     "full_screen": True,
                     "advance_time": 3,
-                    "image_directory": "stock_images",
+                    "image_directory": "data/stock_images",
                     "background_color": "black",
                     "scale_mode": "fill",
-                    "sort_mode": "numeric",
+                    "sort_mode": "alphabetical",
                 },
                 "face_recognition": {
                     "enabled": True,
                     "camera_id": 0,
                     "n": 4,
+                    "model": "sface",
                     "api_endpoint": "http://localhost:8000/api/v1/identify/",
                     "wpu_endpoint": "http://localhost:8000/api/v1/wpu/images",
                     "detection_interval": 5,

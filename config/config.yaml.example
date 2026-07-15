@@ -1,0 +1,45 @@
+# WPU Client Configuration — committed template.
+# Copy to config/config.yaml and edit for your deployment; config.yaml itself
+# is not tracked (see .gitignore) so local endpoint/host edits don't get
+# committed by accident.
+
+log_level: "INFO"
+
+services:
+  slideshow:
+    enabled: true
+    full_screen: true
+    advance_time: 2
+    image_directory: "data/stock_images"
+    image_extensions:
+      - "*.png"
+      - "*.jpg"
+      - "*.jpeg"
+      - "*.gif"
+      - "*.bmp"
+      - "*.webp"
+    background_color: "black"
+    scale_mode: "fill"  # fill, fit, crop
+    sort_mode: "alphabetical"  # numeric, alphabetical
+
+  face_recognition:
+    enabled: true
+    camera_id: 0
+    n: 4
+    # Recognition model: "sface" (OpenCV 128-D, light, default) or "mobilenet"
+    # (distilled MobileFaceNet 512-D → server's auraface gallery). v1: both are
+    # kept and this is a one-line switch while accuracy is still being tested.
+    model: "sface"
+    # Point these at your registration server.
+    api_endpoint: "http://localhost:8000/api/v1/identify/"
+    wpu_endpoint: "http://localhost:8000/api/v1/wpu/images"
+    detection_interval: 1  # seconds between captures
+    min_face_size: 100  # minimum face size in pixels
+    display_result: true  # show result on screen overlay
+    overlay_hide_delay: 3  # seconds to hide overlay
+    person_timeout: 3  # seconds without face before person is considered left
+    # Diagnostic (offline) mode — match against local seeded gallery, no server.
+    # Enable here or with the --diagnostic CLI flag. Seed with scripts/seed_face.py.
+    diagnostic_mode: false
+    diagnostic_gallery_dir: "data/embeddings"
+    diagnostic_match_threshold: 0.5  # cosine distance gate for a local match

@@ -1,49 +1,36 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
-
-# Virtual environments
-.venv
-
-# Python cache
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+build/
+dist/
+wheels/
+*.egg-info/
+.eggs/
 
-# Virtual environments
+# Virtualenvs / tooling
 .venv/
 venv/
 env/
 ENV/
-
-# Python version
 .python-version
 
-# Distribution / packaging
-build/
-dist/
-*.egg-info/
-.eggs/
+# Secrets & local config
+.env
+.env.*
+config/config.local.yaml
 
 # Logs
 *.log
+/var/log/wpu-client/
 
-# IDE / Editors
+# OS / IDE
+.DS_Store
+Thumbs.db
 .vscode/
 .idea/
 
-# OS files
-.DS_Store
-Thumbs.db
-
-# Local config overrides (optional)
-config.local.yaml
-
-# Claude config
+# Claude
 .claude/
 
 # Testing / coverage
@@ -58,19 +45,31 @@ htmlcov/
 *.tmp
 *.temp
 
+# Runtime capture & benchmarks (never shipped)
 dataset/
-data-alloy/
-stock_images/
-face_stock_images/
-diagnostic_gallery/
-embedding_logs/
-
-wpu_client/services/face_recognition/exp3_freeze90_arcface.onnx
-wpu_client/services/face_recognition/face_detection_yunet_2023mar.onnx
-wpu_client/services/face_recognition/glintr100_int8_static_150.onnx
-wpu_client/services/face_recognition/face_recognition_sface_2021dec.onnx
-
-face_detection_yunet_2023mar.onnx
-mobilenetv2_mcp.onnx
-passport_photo.jpeg
+data/dataset/
 benchmark_output/
+data-alloy/
+embedding_logs/
+passport_photo.jpeg
+
+# Archived diagnostic people (kept locally, never shipped, not tracked)
+archive/
+
+# Model weights: ignore all .onnx by default, but TRACK the three runtime
+# models under models/ (~45 MB total, incl. SFace kept for v1) — keeps the
+# git tree self-contained so make_release.sh = archive of tracked files.
+*.onnx
+!models/mobilefacenet.onnx
+!models/face_recognition_sface_2021dec.onnx
+!models/face_detection_yunet_2023mar.onnx
+
+# Diagnostic gallery: track ONLY the three seeded people; ignore any other seeds/local dumps
+data/embeddings/*
+!data/embeddings/varun/
+!data/embeddings/samvaran/
+!data/embeddings/kevin/
+data/people/*
+!data/people/Varun.png
+!data/people/Samvaran.png
+!data/people/Kevin.png
