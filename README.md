@@ -212,7 +212,10 @@ python main.py --diagnostic
 ### Fresh Raspberry Pi setup
 
 ```bash
-scripts/setup.sh
+unzip wpu-client-vX.Y.Z.zip -d am-wpu-client
+cd am-wpu-client
+chmod +rx scripts/setup.sh     # see note below
+./scripts/setup.sh
 ```
 
 Idempotent — installs apt system packages, creates a `--system-site-packages` venv
@@ -220,6 +223,30 @@ Idempotent — installs apt system packages, creates a `--system-site-packages` 
 bundled models are present under `models/`, and installs + enables the
 `slideshow-server` systemd unit (leaving `slideshow-diagnostic` installed but
 disabled).
+
+The app can be unpacked anywhere and run as any user — `setup.sh` reads the actual
+directory, user, uid and session type off the device and substitutes them into the
+systemd unit templates in `systemd/` before installing them to
+`/etc/systemd/system/`. Do not install those templates by hand; they contain
+`@APP_DIR@`-style placeholders. Fleet convention is `/home/dreamvu/wpu_client`.
+
+`config/config.yaml` is **per-device**: untracked, not shipped in the release zip, and
+seeded from `config/config.yaml.example` by step `[5/8]`. Point `api_endpoint` /
+`wpu_endpoint` at the master server before first run — setup echoes their current
+values so a default `localhost` is obvious in the log.
+
+Production installs `sface` only. The research `mobilenet` model needs `onnxruntime`,
+which is an optional extra rather than a base dependency:
+
+```bash
+./.venv/bin/pip install -e '.[research]'   # only if running model: "mobilenet"
+```
+
+**Note on the `chmod`:** `unzip` applies the current umask, and an unusual umask can
+land the scripts as mode `111` (`---x--x--x`) — executable but not *readable*, which
+makes `./scripts/setup.sh` fail with "Permission denied" because bash has to read a
+script, not just have `+x` on it. The `chmod` above unsticks `setup.sh` itself;
+step `[0/8]` then re-asserts sane modes across the rest of the tree.
 
 ### Switching between server and diagnostic mode
 

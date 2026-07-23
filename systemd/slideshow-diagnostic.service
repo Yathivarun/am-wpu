@@ -1,6 +1,6 @@
-# PENDING ON-DEVICE CONFIRMATION (CLEANUP_PLAN.md UNCERTAIN #5) — see
-# slideshow-server.service for the full list of placeholders to verify
-# (folder name, display server, XDG_RUNTIME_DIR uid, linger).
+# TEMPLATE — do not install this file directly.
+# scripts/setup.sh substitutes @APP_DIR@ / @RUN_USER@ / @DISPLAY_ENV@ with the
+# values detected on the device and writes the result to /etc/systemd/system/.
 
 [Unit]
 Description=WPU slideshow — diagnostic mode (local recognition, 3 seeded people)
@@ -8,12 +8,11 @@ Conflicts=slideshow-server.service
 
 [Service]
 Type=simple
-User=dreamvu
-WorkingDirectory=/home/dreamvu/wpu_client
-Environment=WAYLAND_DISPLAY=wayland-0
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-ExecStart=/home/dreamvu/wpu_client/.venv/bin/python main.py --service all --diagnostic
-Restart=on-failure
+User=@RUN_USER@
+WorkingDirectory=@APP_DIR@
+@DISPLAY_ENV@
+ExecStart=@APP_DIR@/.venv/bin/python main.py --service all --diagnostic
+Restart=always
 RestartSec=3
 
 [Install]
