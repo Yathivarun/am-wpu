@@ -23,6 +23,11 @@ config/config.local.yaml
 # shipped one developer's live cluster IP and research model settings to every Pi.
 config/config.yaml
 
+# Working notes — point-in-time scratch, not documentation. README.md is the
+# tracked doc; these go stale the moment the tree moves under them.
+CLEANUP_PLAN.md
+CODEBASE_SUMMARY.md
+
 # Logs
 *.log
 /var/log/wpu-client/
