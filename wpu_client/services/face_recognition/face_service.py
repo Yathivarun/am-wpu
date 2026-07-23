@@ -60,7 +60,7 @@ _SERVER_MODEL_ID = {"sface": "sface", "mobilenet": "auraface"}
 
 # Maximum number of faces processed per captured frame (largest-first). Caps
 # per-frame CPU cost when a crowd is in view; raise/lower freely.
-MAX_FACES_PER_FRAME = 5
+MAX_FACES_PER_FRAME = 2
 
 # ─── Camera configuration (imx219) ──────────────────────────────────────────
 # `rpicam-hello --list-cameras` shows the 1640x1232 sensor mode is read out
