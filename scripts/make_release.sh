@@ -14,5 +14,6 @@ zip -r "$OUT" \
     data/embeddings/varun data/embeddings/samvaran data/embeddings/kevin \
     data/people/Varun.png data/people/Samvaran.png data/people/Kevin.png \
     -x '*/__pycache__/*' '*.pyc' '*/.venv/*' '*/dataset/*' '*/archive/*' \
-       'scripts/benchmarks/*'
+       'scripts/benchmarks/*' \
+       'config/config.yaml' 'config/config.local.yaml'
 echo "Wrote $OUT"
