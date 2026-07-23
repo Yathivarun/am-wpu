@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "wpu-client"
 version = "0.1.0"
@@ -14,6 +18,26 @@ dependencies = [
     "setuptools==80.10.2",
     "scipy",
     "picamera2",
-    "onnxruntime>=1.26.0",
     "psutil",
 ]
+
+# Only the `mobilenet` recognition model needs onnxruntime, and that model is
+# research-only — production runs `sface`, which uses OpenCV's built-in
+# cv2.FaceRecognizerSF. Both import sites are lazy (sface_embedder.py,
+# face_service.py), so a production install never touches it.
+#   research use:  pip install -e '.[research]'
+[project.optional-dependencies]
+research = ["onnxruntime>=1.26.0"]
+
+# `wpu_client` is the only importable package. Without this, setuptools'
+# flat-layout auto-discovery treats data/, config/, models/ and systemd/ as
+# top-level packages too and aborts the build with
+# "Multiple top-level packages discovered in a flat-layout".
+# main.py stays a plain entry script (run by path from WorkingDirectory),
+# not an installed top-level module — hence the empty py-modules.
+[tool.setuptools]
+py-modules = []
+
+[tool.setuptools.packages.find]
+include = ["wpu_client*"]
+namespaces = false
