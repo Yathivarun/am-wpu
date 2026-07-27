@@ -29,6 +29,16 @@ dependencies = [
 [project.optional-dependencies]
 research = ["onnxruntime>=1.26.0"]
 
+# Lint/test tooling. Deliberately excludes picamera2/pygobject's system
+# counterparts — CI installs this group only (no hardware/GTK stack), so
+# tests stick to modules that don't need a camera or a display.
+#   dev use:  pip install -e '.[dev]'
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
 # `wpu_client` is the only importable package. Without this, setuptools'
 # flat-layout auto-discovery treats data/, config/, models/ and systemd/ as
 # top-level packages too and aborts the build with
@@ -41,3 +51,26 @@ py-modules = []
 [tool.setuptools.packages.find]
 include = ["wpu_client*"]
 namespaces = false
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["scripts/benchmarks", "archive"]
+
+[tool.ruff.lint]
+# Deliberately no "UP" (pyupgrade): the codebase uses Optional[X] pervasively
+# (32 call sites) and switching that to X | None is a pure style migration,
+# out of scope for a CI-setup change. Revisit separately if wanted.
+select = ["E", "F", "I", "B"]
+# B008: FastAPI/pydantic-style `Field(...)` defaults are the pattern used
+# throughout wpu_client/models and wpu_client/config — not a real footgun here.
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# gi.require_version(...) must run before `from gi.repository import ...` —
+# PyGObject picks the wrong GTK ABI otherwise — so these imports can't move
+# to the top of the file without breaking at runtime.
+"wpu_client/services/slideshow/slideshow_service.py" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

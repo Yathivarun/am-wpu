@@ -8,7 +8,7 @@ import signal
 import sys
 
 from wpu_client.config.settings import get_settings
-from wpu_client.core.events import EventBus, get_event_bus
+from wpu_client.core.events import get_event_bus
 from wpu_client.core.service_base import ServiceBase
 from wpu_client.services.face_recognition.face_service import FaceRecognitionService
 from wpu_client.services.slideshow.slideshow_service import SlideshowService
