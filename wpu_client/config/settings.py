@@ -1,7 +1,6 @@
 
 """Configuration management for WPU Client."""
 
-import os
 from pathlib import Path
 from typing import Any, Optional
 

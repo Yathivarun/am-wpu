@@ -8,12 +8,6 @@ import time
 import uuid
 from typing import Optional
 
-from wpu_client.paths import DATA_DIR, MODELS_DIR
-
-DATASET_DIR = str(DATA_DIR / "dataset")
-DATASET_MAX_BYTES = 30 * 1024 * 1024 * 1024  # 30 GB hard cap
-DATASET_MAX_FRAMES_PER_VISIT = 50             # max frames saved per visit
-
 import cv2
 import numpy as np
 from picamera2 import Picamera2
@@ -23,10 +17,15 @@ from wpu_client.config.settings import FaceRecognitionConfig
 from wpu_client.core.events import Event, EventBus
 from wpu_client.core.service_base import ServiceBase
 from wpu_client.models.api import IdentifyRequest, IdentifyResponse
+from wpu_client.paths import DATA_DIR, MODELS_DIR
 from wpu_client.services.face_recognition.diagnostic_gallery import DiagnosticGallery
 from wpu_client.utils.http import HTTPClient
 
 logger = logging.getLogger(__name__)
+
+DATASET_DIR = str(DATA_DIR / "dataset")
+DATASET_MAX_BYTES = 30 * 1024 * 1024 * 1024  # 30 GB hard cap
+DATASET_MAX_FRAMES_PER_VISIT = 50             # max frames saved per visit
 
 # Enable debug frame saving by setting environment variable: SAVE_DEBUG_FRAMES=1
 SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "0") == "1"
@@ -123,8 +122,9 @@ class FaceRecognitionService(ServiceBase):
             config: Face recognition configuration
             event_bus: Event bus for inter-service communication
         """
-        import psutil
         import os
+
+        import psutil
         self._process = psutil.Process(os.getpid())
 
         super().__init__("face_recognition")
@@ -163,7 +163,10 @@ class FaceRecognitionService(ServiceBase):
         self._save_every_n_frames = 2
         if SAVE_DEBUG_FRAMES:
             os.makedirs(DEBUG_FRAME_DIR, exist_ok=True)
-            logger.info(f"Debug frame saving enabled. Saving every {self._save_every_n_frames} frames (max {self._max_debug_frames} total)")
+            logger.info(
+                f"Debug frame saving enabled. Saving every {self._save_every_n_frames} "
+                f"frames (max {self._max_debug_frames} total)"
+            )
             logger.info(f"Debug frames will be saved to {DEBUG_FRAME_DIR}")
 
         # Recognition model selection (config.yaml: "sface" | "mobilenet").
@@ -699,7 +702,10 @@ class FaceRecognitionService(ServiceBase):
                 f"first 3: [{face_vector[0]:.4f}, {face_vector[1]:.4f}, {face_vector[2]:.4f}]"
             )
             logger.info(f"Sending POST request to {self.config.api_endpoint}")
-            logger.info(f"Request: type={request_data['type']}, n={request_data['n']}, vector={vector_preview}")
+            logger.info(
+                f"Request: type={request_data['type']}, n={request_data['n']}, "
+                f"vector={vector_preview}"
+            )
 
             response_data = self._http_client.post(
                 self.config.api_endpoint,
@@ -935,7 +941,10 @@ class FaceRecognitionService(ServiceBase):
                 "unrecognized": unrecognized,
             },
         ))
-        logger.info(f"Emitted person.detected: {person_name} (registration_id: {registration_id}, sketches: {sketch_dir})")
+        logger.info(
+            f"Emitted person.detected: {person_name} "
+            f"(registration_id: {registration_id}, sketches: {sketch_dir})"
+        )
 
     def _emit_person_left_event(self, registration_id: str) -> None:
         """Emit person.left for the previously-displayed face and write its

@@ -1,6 +1,5 @@
 """API models for face recognition requests and responses."""
 
-from typing import Any
 
 from pydantic import BaseModel, Field
 

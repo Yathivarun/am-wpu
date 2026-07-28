@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same PR/branch.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install ruff
+
+      - run: ruff check .
+
+  test:
+    name: Unit tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # `pygobject` and `picamera2` (base deps in pyproject.toml) need a real
+      # GTK4/libcamera stack that only exists on a Pi — they're not
+      # pip-installable on a generic runner. Unit tests only cover modules
+      # that don't import those (config, event bus, API models, paths, and
+      # the slideshow sort-key, whose gi import is stubbed in
+      # tests/conftest.py), so CI installs just the portable subset of the
+      # runtime deps rather than `pip install -e .` / `uv sync`.
+      - name: Install test dependencies
+        run: |
+          pip install pytest pytest-cov \
+            pyyaml pydantic numpy opencv-python-headless scipy httpx psutil
+
+      - run: pytest --cov=wpu_client --cov-report=term-missing

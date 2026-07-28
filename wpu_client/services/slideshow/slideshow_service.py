@@ -7,12 +7,11 @@ import threading
 import time
 from typing import Optional
 
-import numpy as np
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib, GdkPixbuf, Gtk, Gio
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
 
 from wpu_client.config.settings import SlideshowConfig
 from wpu_client.core.events import Event, EventBus
@@ -143,7 +142,10 @@ class SlideshowService(ServiceBase):
             logger.warning("person.detected event missing registration_id")
             return
 
-        logger.info(f"Person detected: {person_name} (registration_id: {registration_id}, sketches: {sketch_dir})")
+        logger.info(
+            f"Person detected: {person_name} "
+            f"(registration_id: {registration_id}, sketches: {sketch_dir})"
+        )
 
         # Fetch WPU images and switch mode
         if self._app:
@@ -346,7 +348,7 @@ class SlideshowWindow(Gtk.ApplicationWindow):
             # Check if this is a URL (visitor mode) or local file (stock mode)
             if image_path.startswith("http://") or image_path.startswith("https://"):
                 # Load from URL using httpx and GdkPixbuf
-                logger.debug(f"Loading image from URL")
+                logger.debug("Loading image from URL")
                 response = self.service._http_client._client.get(image_path)
                 response.raise_for_status()
 
@@ -554,7 +556,10 @@ class SlideshowApp(Gtk.Application):
         `unrecognized` marks the unknown-face preview: a random person's
         sketches are shown with a 'Not recognized' overlay instead of a welcome.
         """
-        logger.info(f"Switching to visitor mode: {person_name} (registration_id: {registration_id}, sketches: {sketch_dir})")
+        logger.info(
+            f"Switching to visitor mode: {person_name} "
+            f"(registration_id: {registration_id}, sketches: {sketch_dir})"
+        )
 
         # Diagnostic mode shows this person's own local sketches; normal mode
         # fetches this visitor's generated images from the server.
