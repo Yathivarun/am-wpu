@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 LEGACY_EMBEDDING_FILE = "embedding.npy"  # pre-multi-model seeds (sface 128-D)
 META_FILE = "meta.json"
 SKETCHES_DIR = "sketches"
+# Alpha-cutout face images used for duo scene composition — pre-cropped,
+# transparent-background PNGs (see mask_to_alpha.py). Not the final rendered
+# sketches; these are the raw compositing source faces.
+ALPHA_SUBDIR = "images"
 
 
 def _embedding_file(model: str) -> str:
@@ -45,7 +49,8 @@ class GalleryEntry:
     # model name → L2-normalised vector (e.g. {"sface": 128-D, "mobilenet": 512-D}).
     vectors: dict[str, np.ndarray] = field(default_factory=dict)
     sketch_dir: str = ""  # data/embeddings/<slug>/sketches — this person's sketches
-    gender: Optional[str] = None  # optional metadata; not used for display
+    alpha_dir: str = ""  # data/embeddings/<slug>/sketches/images — duo-compose source faces
+    gender: Optional[str] = None  # optional metadata; used for scene gender filtering
 
 
 @dataclass
@@ -105,6 +110,7 @@ class DiagnosticGallery:
                     name=meta.get("name", slug),
                     vectors=vectors,
                     sketch_dir=os.path.join(person_dir, SKETCHES_DIR),
+                    alpha_dir=os.path.join(person_dir, SKETCHES_DIR, ALPHA_SUBDIR),
                     gender=str(gender).lower() if gender else None,
                 ))
             except Exception as e:
@@ -121,6 +127,13 @@ class DiagnosticGallery:
 
     def __len__(self) -> int:
         return len(self._entries)
+
+    def get_entry(self, slug: str) -> Optional[GalleryEntry]:
+        """Look up a loaded entry by its slug (registration_id), or None."""
+        for entry in self._entries:
+            if entry.slug == slug:
+                return entry
+        return None
 
     def random_entry(self) -> Optional[GalleryEntry]:
         """A random seeded person — prefers one that actually has sketches.

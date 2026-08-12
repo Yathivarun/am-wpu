@@ -19,6 +19,7 @@ from wpu_client.core.service_base import ServiceBase
 from wpu_client.models.api import IdentifyRequest, IdentifyResponse
 from wpu_client.paths import DATA_DIR, MODELS_DIR
 from wpu_client.services.face_recognition.diagnostic_gallery import DiagnosticGallery
+from wpu_client.services.face_recognition.duo_composer import compose_duo, pick_alpha_image
 from wpu_client.utils.http import HTTPClient
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,16 @@ logger = logging.getLogger(__name__)
 DATASET_DIR = str(DATA_DIR / "dataset")
 DATASET_MAX_BYTES = 30 * 1024 * 1024 * 1024  # 30 GB hard cap
 DATASET_MAX_FRAMES_PER_VISIT = 50             # max frames saved per visit
+
+# ── Duo scene composition (diagnostic mode only) ────────────────────────────
+# When exactly two known people are tracked together, their alpha-cutout
+# faces (data/embeddings/<slug>/sketches/images/) are composed onto every
+# matching scene under DUO_SCENES_DIR, using DUO_SCENES_CONFIG for placement.
+# Output is cached under DUO_OUTPUT_DIR/<slug_a>__<slug_b>/ and reused for as
+# long as that exact pair stays in frame (and across restarts, on disk).
+DUO_SCENES_DIR = DATA_DIR / "duo_scenes"
+DUO_SCENES_CONFIG_PATH = DUO_SCENES_DIR / "scenes_config.json"
+DUO_OUTPUT_DIR = DATA_DIR / "duo_output"
 
 # Enable debug frame saving by setting environment variable: SAVE_DEBUG_FRAMES=1
 SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "0") == "1"
@@ -146,6 +157,17 @@ class FaceRecognitionService(ServiceBase):
         # _select_person_for_display() — that is the ONLY place to touch to
         # change which person's images get fetched when several are visible.
         self._displayed_registration_id: Optional[str] = None
+        # Snapshot of whatever is currently displayed (person_name, confidence,
+        # visit_start_time, visit_frame_count) — needed because a displayed
+        # "duo" has a synthetic registration_id that isn't a key in
+        # _tracked_faces, so _emit_person_left_event can't look it up there.
+        self._displayed_meta: Optional[dict] = None
+
+        # Duo composition cache: frozenset({slug_a, slug_b}) -> sketch_dir
+        # (the folder of composed scene images). Built once per pair, reused
+        # for as long as that exact pair stays tracked together. Diagnostic
+        # mode only.
+        self._duo_cache: dict[frozenset, str] = {}
 
         # Similarity threshold for local matching (lower = more strict)
         # Cosine distance: 0 = identical, 1 = completely different
@@ -877,28 +899,141 @@ class FaceRecognitionService(ServiceBase):
         return max(tracked_faces.items(), key=lambda kv: kv[1].get("bbox_area", 0.0))[0]
 
     def _update_display_selection(self) -> None:
-        """Re-run _select_person_for_display() and emit person.left/
-        person.detected if the selected person changed."""
+        """Re-run selection and emit person.left/person.detected if the
+        selected display target changed.
+
+        Diagnostic mode only: when exactly two currently-tracked faces are
+        both recognized (neither is "Not recognized"), that pair drives the
+        display via a composed duo scene instead of the usual single
+        biggest-face rule — see _get_or_build_duo_sketch_dir(). Any other
+        combination (0, 1, or >2 faces; or 2 faces where either is
+        unrecognized) uses the existing _select_person_for_display() path
+        unchanged.
+        """
         with self._person_lock:
-            selected_id = self._select_person_for_display(self._tracked_faces)
+            recognized_ids = [
+                rid for rid, e in self._tracked_faces.items() if not e["unrecognized"]
+            ]
+            duo_mode = (
+                self._diagnostic_mode
+                and len(self._tracked_faces) == 2
+                and len(recognized_ids) == 2
+            )
+
+            if duo_mode:
+                id_a, id_b = sorted(recognized_ids)
+                pair_key = frozenset((id_a, id_b))
+                selected_id = f"duo::{id_a}::{id_b}"
+                entry_a, entry_b = self._tracked_faces[id_a], self._tracked_faces[id_b]
+            else:
+                pair_key = None
+                selected_id = self._select_person_for_display(self._tracked_faces)
+                entry_a = entry_b = None
+
             if selected_id == self._displayed_registration_id:
                 return
 
             previous_id = self._displayed_registration_id
+            previous_meta = self._displayed_meta
             self._displayed_registration_id = selected_id
-            entry = self._tracked_faces.get(selected_id) if selected_id else None
+
+            if duo_mode:
+                new_meta = {
+                    "person_name": f"{entry_a['person_name']} & {entry_b['person_name']}",
+                    "confidence": min(entry_a["confidence"], entry_b["confidence"]),
+                    "visit_start_time": time.time(),
+                    "visit_frame_count": 0,
+                }
+            elif selected_id is not None:
+                single_entry = self._tracked_faces.get(selected_id)
+                new_meta = dict(single_entry) if single_entry else None
+            else:
+                new_meta = None
+            self._displayed_meta = new_meta
 
         if previous_id is not None:
-            self._emit_person_left_event(previous_id)
-
-        if selected_id is not None and entry is not None:
-            self._emit_person_detected_event(
-                selected_id,
-                entry["person_name"],
-                entry["confidence"],
-                entry.get("sketch_dir"),
-                entry.get("unrecognized", False),
+            pm = previous_meta or {}
+            self._emit_person_left_event(
+                previous_id,
+                person_name=pm.get("person_name"),
+                confidence=pm.get("confidence", 0.0),
+                visit_start_time=pm.get("visit_start_time"),
+                visit_frame_count=pm.get("visit_frame_count", 0),
             )
+
+        if duo_mode:
+            sketch_dir = self._get_or_build_duo_sketch_dir(pair_key, entry_a, entry_b, id_a, id_b)
+            if sketch_dir:
+                self._emit_person_detected_event(
+                    selected_id, new_meta["person_name"], new_meta["confidence"],
+                    sketch_dir=sketch_dir, unrecognized=False,
+                )
+                return
+            # Composition unavailable (missing alpha images/scenes/eyes) —
+            # fall back to the normal single biggest-face display instead.
+            logger.warning(
+                "Duo composition unavailable for this pair — falling back to "
+                "single-face display"
+            )
+            with self._person_lock:
+                fallback_id = self._select_person_for_display(self._tracked_faces)
+                self._displayed_registration_id = fallback_id
+                fb_entry = self._tracked_faces.get(fallback_id) if fallback_id else None
+                self._displayed_meta = dict(fb_entry) if fb_entry else None
+            if fallback_id is not None and fb_entry is not None:
+                self._emit_person_detected_event(
+                    fallback_id, fb_entry["person_name"], fb_entry["confidence"],
+                    fb_entry.get("sketch_dir"), fb_entry.get("unrecognized", False),
+                )
+            return
+
+        if selected_id is not None:
+            entry = self._tracked_faces.get(selected_id)
+            if entry is not None:
+                self._emit_person_detected_event(
+                    selected_id, entry["person_name"], entry["confidence"],
+                    entry.get("sketch_dir"), entry.get("unrecognized", False),
+                )
+
+    def _get_or_build_duo_sketch_dir(
+        self, pair_key: frozenset, entry_a: dict, entry_b: dict, id_a: str, id_b: str
+    ) -> Optional[str]:
+        """Return the composed-scenes folder for this pair, building it once
+        and caching thereafter (in memory here; on disk inside compose_duo).
+        Returns None if composition isn't possible — caller falls back."""
+        cached = self._duo_cache.get(pair_key)
+        if cached:
+            return cached
+
+        if not self._gallery:
+            return None
+
+        gallery_entry_a = self._gallery.get_entry(id_a)
+        gallery_entry_b = self._gallery.get_entry(id_b)
+        if gallery_entry_a is None or gallery_entry_b is None:
+            logger.warning(f"Duo compose: gallery entry missing for '{id_a}' or '{id_b}'")
+            return None
+
+        alpha_path_a = pick_alpha_image(gallery_entry_a.alpha_dir)
+        alpha_path_b = pick_alpha_image(gallery_entry_b.alpha_dir)
+        if alpha_path_a is None or alpha_path_b is None:
+            logger.warning(
+                f"Duo compose: no alpha image(s) found "
+                f"(a={gallery_entry_a.alpha_dir!r}, b={gallery_entry_b.alpha_dir!r})"
+            )
+            return None
+
+        output_dir = DUO_OUTPUT_DIR / f"{id_a}__{id_b}"
+        sketch_dir = compose_duo(
+            self._yunet_detector,
+            alpha_path_a, alpha_path_b,
+            gallery_entry_a.gender, gallery_entry_b.gender,
+            DUO_SCENES_DIR, DUO_SCENES_CONFIG_PATH,
+            output_dir,
+        )
+        if sketch_dir:
+            self._duo_cache[pair_key] = sketch_dir
+        return sketch_dir
 
     def _check_person_timeout(self) -> None:
         """Drop any tracked face not seen within the timeout window. If the
@@ -946,20 +1081,36 @@ class FaceRecognitionService(ServiceBase):
             f"(registration_id: {registration_id}, sketches: {sketch_dir})"
         )
 
-    def _emit_person_left_event(self, registration_id: str) -> None:
-        """Emit person.left for the previously-displayed face and write its
-        visit log row. Called when display-selection changes, or that
-        face's tracking entry times out, or the service is stopping."""
-        with self._person_lock:
-            entry = self._tracked_faces.get(registration_id)
+    def _emit_person_left_event(
+        self,
+        registration_id: str,
+        person_name: Optional[str] = None,
+        confidence: float = 0.0,
+        visit_start_time: Optional[float] = None,
+        visit_frame_count: int = 0,
+    ) -> None:
+        """Emit person.left for the previously-displayed face/pair and write
+        its visit log row. Called when display-selection changes, or that
+        face's tracking entry times out, or the service is stopping.
 
-        person_name = entry["person_name"] if entry else "unknown"
+        `person_name`/etc. can be passed explicitly (used for a duo's
+        synthetic registration_id, which is not a key in _tracked_faces);
+        if omitted, they're looked up from _tracked_faces as before.
+        """
+        if person_name is None:
+            with self._person_lock:
+                entry = self._tracked_faces.get(registration_id)
+            person_name = entry["person_name"] if entry else "unknown"
+            confidence = entry["confidence"] if entry else 0.0
+            visit_start_time = entry["visit_start_time"] if entry else time.time()
+            visit_frame_count = entry["visit_frame_count"] if entry else 0
+
         self._log_visit(
             person_name=person_name,
             registration_id=registration_id,
-            confidence=entry["confidence"] if entry else 0.0,
-            visit_start_time=entry["visit_start_time"] if entry else time.time(),
-            visit_frame_count=entry["visit_frame_count"] if entry else 0,
+            confidence=confidence,
+            visit_start_time=visit_start_time if visit_start_time is not None else time.time(),
+            visit_frame_count=visit_frame_count,
         )
 
         self.event_bus.publish(Event(

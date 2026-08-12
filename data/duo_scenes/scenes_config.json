@@ -1,0 +1,15 @@
+{
+  "1": {
+    "gender": ["male"],
+    "face_anchor_1": {
+      "target_eye_midpoint": [931, 518],
+      "target_eye_distance": 50,
+      "target_tilt_angle": 0
+    },
+    "face_anchor_2": {
+      "target_eye_midpoint": [1499, 567],
+      "target_eye_distance": 52,
+      "target_tilt_angle": 0
+    }
+  }
+}

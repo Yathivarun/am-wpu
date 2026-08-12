@@ -64,6 +64,10 @@ passport_photo.jpeg
 # Archived diagnostic people (kept locally, never shipped, not tracked)
 archive/
 
+# Duo scene composition cache — generated per-pair from data/duo_scenes/ +
+# each person's alpha image, reproducible, never shipped.
+data/duo_output/
+
 # Model weights: ignore all .onnx by default, but TRACK the three runtime
 # models under models/ (~45 MB total, incl. SFace kept for v1) — keeps the
 # git tree self-contained so make_release.sh = archive of tracked files.
