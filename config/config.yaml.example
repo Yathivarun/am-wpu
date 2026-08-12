@@ -18,6 +18,14 @@ services:
       - "*.gif"
       - "*.bmp"
       - "*.webp"
+    # Video slides, mixed in alongside images (stock images/ and per-person
+    # sketches/). Played via GStreamer (Gtk.MediaFile) — see the README's
+    # System Dependencies section for the required apt packages. Always
+    # muted; advances on playback completion (falls back to a fixed
+    # ~10s timer if a video's duration can't be determined).
+    video_extensions:
+      - "*.mov"
+      - "*.mp4"
     background_color: "black"
     scale_mode: "fill"  # fill, fit, crop
     sort_mode: "alphabetical"  # numeric, alphabetical

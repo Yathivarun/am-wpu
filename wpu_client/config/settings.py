@@ -1,4 +1,3 @@
-
 """Configuration management for WPU Client."""
 
 from pathlib import Path
@@ -20,6 +19,9 @@ class SlideshowConfig(BaseModel):
     image_extensions: list[str] = Field(
         default_factory=lambda: ["*.png", "*.jpg", "*.jpeg", "*.gif", "*.bmp", "*.webp"]
     )
+    # Video slides mixed in alongside images (stock and per-person sketches).
+    # Played via Gtk.MediaFile; always muted, since this is a kiosk display.
+    video_extensions: list[str] = Field(default_factory=lambda: ["*.mov", "*.mp4"])
     background_color: str = "black"
     scale_mode: str = "fill"  # fill, fit, crop
     sort_mode: str = "alphabetical"  # numeric, alphabetical

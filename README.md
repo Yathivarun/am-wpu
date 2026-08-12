@@ -148,13 +148,22 @@ GTK4 (slideshow UI) and Picamera2 (camera capture) need system packages; there i
 **no `dlib` dependency** in this project, so no `cmake`/`g++`/`libboost` toolchain is
 required.
 
+Video slides (mixed in alongside image slides — see `video_extensions` in
+`config/config.yaml.example`) are decoded with a manual GStreamer pipeline
+(`filesrc ! decodebin ! videoconvert ! appsink`), not `Gtk.MediaFile` — the
+`gtk4paintablesink` package that backend needs isn't available on all
+Debian/Raspberry Pi OS releases, and without it video plays silently but
+never paints a frame. The manual pipeline only needs the plugins below.
+
 **Debian/Ubuntu (incl. Raspberry Pi OS):**
 ```bash
 sudo apt install -y \
     python3 python3-venv python3-dev \
     libgtk-4-1 gir1.2-gtk-4.0 python3-gi python3-gi-cairo \
     python3-picamera2 \
-    libgl1 libglib2.0-0
+    libgl1 libglib2.0-0 \
+    gir1.2-gstreamer-1.0 gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly gstreamer1.0-libav
 ```
 
 ## Configuration

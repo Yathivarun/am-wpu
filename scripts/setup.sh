@@ -26,7 +26,9 @@ sudo apt-get install -y \
     python3 python3-venv python3-dev \
     libgtk-4-1 gir1.2-gtk-4.0 python3-gi python3-gi-cairo \
     python3-picamera2 \
-    libgl1 libglib2.0-0 libcap-dev
+    libgl1 libglib2.0-0 libcap-dev \
+    gir1.2-gstreamer-1.0 gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+    gstreamer1.0-plugins-ugly gstreamer1.0-libav
 
 echo "[2/8] Python venv"
 [ -d .venv ] || python3 -m venv --system-site-packages .venv   # system-site for picamera2/gi
