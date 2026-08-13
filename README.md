@@ -5,6 +5,39 @@ Raspberry Pi kiosk display.
 
 ## Changelog
 
+### 2026-08-13 — Local SAU/FRU composition in base (server-recognition) mode
+
+Base mode no longer downloads pre-composed final images. The server serves two raw
+alpha cutouts per person — a body cutout (**SAU**) and a face cutout (**FRU**) — over
+the existing `wpu_endpoint`, and the Pi composes them onto local scene backgrounds
+live, for both single-person and 2-person display. This moves the "pre-render every
+person × scene combination" cost off the server: it stores one cutout pair per
+person, and the Pi composes on demand.
+
+- **New scene assets** under `data/base_scenes/{sau_single,sau_duo,fru_single,fru_duo}/`,
+  each a `scenes_config.json` plus background images. **These do not exist yet** — the
+  code degrades cleanly until they're supplied, composing nothing and falling back.
+- **Duo display now works in base mode too**, not just diagnostic. If one of a pair
+  has no usable assets, the other is shown alone rather than nothing.
+- **Caching:** fetched cutouts and composed slides live under
+  `data/base_assets/<registration_id>/`, pairs under `data/base_assets/duo/<a>__<b>/`.
+  Cutouts are revalidated by ETag, so re-photographing a person (which overwrites the
+  same object key server-side) correctly invalidates their slides and every pair they
+  appear in. Composed output is JPEG q90 — ~6× smaller than PNG at no visible cost on
+  a projector.
+- **Disk budget:** `base_assets_max_bytes` (default 5 GB) caps the cache; over it,
+  least-recently-used entries are evicted, duo pairs first since pairs grow
+  quadratically with visitor count and rebuild cheaply from the retained cutouts.
+- **Rollback valve:** `use_legacy_final_images: true` reverts to the old
+  pre-composed-image path with one config flip, no redeploy.
+- **Diagnostic mode is unchanged** — its duo feature (`data/duo_scenes/`,
+  `data/duo_output/`, `compose_duo`) shares no assets or code path with the above.
+
+Pending backend work, tracked as placeholders in config: the `gender` field on the
+`/identify` response, and the videos endpoint (`wpu_videos_endpoint` — no such route
+exists server-side yet). Video fetching is best-effort and single-person only; a
+missing video never fails anything.
+
 ### 2026-07-11 — Repo reorganisation, dual-model cleanup, two systemd modes
 
 Restructured the repo for release packaging and fixed several latent bugs, without
@@ -124,6 +157,9 @@ currently kept and selected with `model:` in `config.yaml` (see reorg entry abov
 - **Slideshow Service**: Full-screen image display with configurable timing
 - **Face Recognition Service**: Continuous face detection and identification, either
   via the registration server or fully offline (diagnostic mode)
+- **Local scene composition**: Composes each visitor's slides on-device from raw
+  SAU/FRU cutouts onto local backgrounds, for one or two people, instead of
+  downloading pre-rendered images
 - **Event Bus**: Inter-service communication for displaying recognition results
 - **Configurable**: YAML-based configuration for all settings
 - **Extensible**: Easy to add new services (voice, gesture, etc.)
@@ -326,7 +362,13 @@ Expected response:
 ├── data/
 │   ├── stock_images/            # default slideshow images
 │   ├── embeddings/              # diagnostic gallery (3 seeded people, tracked)
-│   └── people/                  # reference photos for the seeded people
+│   ├── people/                  # reference photos for the seeded people
+│   ├── duo_scenes/              # diagnostic duo backgrounds + placement config
+│   ├── duo_output/              # gitignored: composed diagnostic duo scenes
+│   ├── base_scenes/             # base-mode backgrounds + placement configs
+│   │                            #   sau_single/ sau_duo/ fru_single/ fru_duo/
+│   └── base_assets/             # gitignored: fetched cutouts + composed slides,
+│                                #   size-capped, LRU-evicted
 ├── archive/                    # git-ignored: pruned diagnostic people, not deleted
 ├── config/
 │   ├── config.yaml.example      # tracked template

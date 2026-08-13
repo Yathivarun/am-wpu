@@ -68,6 +68,12 @@ archive/
 # each person's alpha image, reproducible, never shipped.
 data/duo_output/
 
+# Base-mode asset cache — server-fetched SAU/FRU cutouts, fetched videos and
+# the slides composed from them, per person and per pair. Entirely
+# regenerable, size-capped at runtime (base_assets_max_bytes), and can reach
+# gigabytes on a busy kiosk — never tracked, never shipped.
+data/base_assets/
+
 # Model weights: ignore all .onnx by default, but TRACK the three runtime
 # models under models/ (~45 MB total, incl. SFace kept for v1) — keeps the
 # git tree self-contained so make_release.sh = archive of tracked files.
