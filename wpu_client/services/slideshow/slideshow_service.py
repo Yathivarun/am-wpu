@@ -201,7 +201,8 @@ class SlideshowService(ServiceBase):
     """
 
     def __init__(self, config: SlideshowConfig, event_bus: EventBus, wpu_endpoint: str,
-                 face_service=None, diagnostic_mode: bool = False):
+                 face_service=None, diagnostic_mode: bool = False,
+                 use_legacy_final_images: bool = False):
         """
         Initialize the slideshow service.
 
@@ -213,6 +214,11 @@ class SlideshowService(ServiceBase):
             diagnostic_mode: If True, show the matched person's own local sketches
                 (data/embeddings/<slug>/sketches/) on recognition instead of
                 fetching visitor images from the server.
+            use_legacy_final_images: Rollback valve. If True, always fetch the
+                server's pre-composed final images and ignore locally-composed
+                slides. Lives on the face_recognition config (it describes what
+                wpu_endpoint is expected to serve) and is passed in here, the
+                same way diagnostic_mode is.
         """
         super().__init__("slideshow")
         self.config = config
@@ -220,6 +226,7 @@ class SlideshowService(ServiceBase):
         self.wpu_endpoint = wpu_endpoint
         self.face_service = face_service  # used for bottom-left camera preview
         self.diagnostic_mode = diagnostic_mode
+        self.use_legacy_final_images = use_legacy_final_images
         self._app: Optional[SlideshowApp] = None
         self._overlay_text: Optional[str] = None
         self._overlay_hide_time: float = 0
@@ -912,14 +919,19 @@ class SlideshowApp(Gtk.Application):
             return []
 
     def _load_person_sketches(self, sketch_dir: str) -> list[str]:
-        """Diagnostic mode: this person's own face-swap sketches.
+        """This person's locally-available slides, images and videos together.
 
-        Reads <sketch_dir>/* (i.e. data/embeddings/<slug>/sketches/).
-        Returns [] if the folder is missing or empty — e.g. the person is seeded
-        but their face-swap render hasn't been dropped in yet.
+        Reads a single flat <sketch_dir>/, whichever mode produced it:
+        diagnostic mode's seeded sketches (data/embeddings/<slug>/sketches/),
+        or base mode's locally-composed SAU/FRU scenes plus hardlinked videos
+        (data/base_assets/<registration_id>/display/, or the duo equivalent).
+        The body is mode-agnostic — it just globs a directory.
+
+        Returns [] if the folder is missing or empty — e.g. the person is
+        known but nothing has been composed or dropped in for them yet.
         """
         if not sketch_dir or not os.path.isdir(sketch_dir):
-            logger.warning(f"Diagnostic: no sketches folder for this person ({sketch_dir!r})")
+            logger.warning(f"No slides folder for this person ({sketch_dir!r})")
             return []
         files: list[str] = []
         for ext in self.config.image_extensions:
@@ -929,7 +941,7 @@ class SlideshowApp(Gtk.Application):
         for ext in self.config.video_extensions:
             files.extend(glob.glob(os.path.join(sketch_dir, ext)))
         files.sort(key=lambda p: os.path.basename(p).lower())
-        logger.info(f"Diagnostic: loaded {len(files)} sketch(es)/video(s) from {sketch_dir}")
+        logger.info(f"Loaded {len(files)} local slide(s)/video(s) from {sketch_dir}")
         return files
 
     def switch_to_visitor_mode(self, registration_id: str, person_name: str,
@@ -944,9 +956,18 @@ class SlideshowApp(Gtk.Application):
             f"(registration_id: {registration_id}, sketches: {sketch_dir})"
         )
 
-        # Diagnostic mode shows this person's own local sketches; normal mode
-        # fetches this visitor's generated images from the server.
-        if self.service.diagnostic_mode:
+        # Asset-driven, not mode-driven: whenever locally-composed slides
+        # exist for this person, show them. That covers diagnostic mode (its
+        # sketch_dir is always set on a gallery match) and base mode (whose
+        # sketch_dir is now populated by local SAU/FRU composition). Only
+        # when there's nothing local — composition failed, assets weren't
+        # available, or the legacy valve is on — does this fall back to
+        # fetching the server's pre-composed final images.
+        if (
+            sketch_dir
+            and os.path.isdir(sketch_dir)
+            and not self.service.use_legacy_final_images
+        ):
             visitor_images = self._load_person_sketches(sketch_dir)
         else:
             visitor_images = self._fetch_visitor_images(registration_id)

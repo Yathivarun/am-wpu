@@ -133,6 +133,9 @@ def main():
                     settings.services.face_recognition.wpu_endpoint,
                     face_recognition_service,
                     diagnostic_mode=settings.services.face_recognition.diagnostic_mode,
+                    use_legacy_final_images=(
+                        settings.services.face_recognition.use_legacy_final_images
+                    ),
                 )
             )
             logger.info("Slideshow service added")
