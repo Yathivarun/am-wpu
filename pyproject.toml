@@ -11,8 +11,23 @@ requires-python = ">=3.11"
 dependencies = [
     "pygobject==3.42.2",
     "pyyaml",
-    "opencv-python",
-    "numpy",
+    # ── NumPy 1.x pin, and why opencv is pinned with it ──────────────────
+    # picamera2 on the Pi is built against the NumPy 1.x C ABI, so resolving
+    # NumPy to 2.x makes the first run die on import with a binary
+    # incompatibility ("_ARRAY_API not found" / "compiled using NumPy 1.x
+    # cannot be run in NumPy 2.x"). Unpinned, uv.lock resolved to 2.4.2 and
+    # every fresh install needed a manual
+    # `pip install --force-reinstall numpy==1.26.4` to recover.
+    #
+    # opencv-python has to be pinned in lockstep: 4.12.0.88 and later declare
+    # `numpy>=2` on Python >= 3.9, so leaving opencv free makes the two
+    # requirements unsatisfiable and `uv sync` fails to resolve. 4.11.0.86 is
+    # the last release that still accepts NumPy 1.x.
+    #
+    # These two move together. Unpin only when picamera2 on the target Pi OS
+    # ships built against NumPy 2.x, and re-test on-device.
+    "opencv-python==4.11.0.86",
+    "numpy==1.26.4",
     "httpx",
     "pydantic",
     "setuptools==80.10.2",
