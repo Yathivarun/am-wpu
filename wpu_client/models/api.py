@@ -49,6 +49,10 @@ class IdentifyResponse(BaseModel):
     confidence: float | None = None
     match_type: str | None = None
     message: str | None = None
+    # Used to pick which local scenes this person may be composed onto (base
+    # mode). Optional on purpose: servers that don't return it yet leave it
+    # None, and a None gender never excludes a scene.
+    gender: str | None = None
 
     @property
     def person_name(self) -> str:

@@ -106,6 +106,52 @@ class HTTPClient:
         logger.error(f"All retry attempts failed for {url}")
         raise last_error
 
+    def download_binary(
+        self,
+        url: str,
+        headers: dict | None = None,
+    ) -> bytes | None:
+        """
+        Best-effort single-attempt GET returning raw bytes.
+
+        Unlike post()/get(), this never raises and never retries: callers
+        fetch optional assets (cutouts, videos) where a missing or
+        unreachable file is a normal outcome to be skipped, not an error to
+        be recovered from. Returns None on any failure — network error,
+        non-2xx status, or anything else.
+
+        Args:
+            url: The URL to download
+            headers: Optional HTTP headers (e.g. If-None-Match for
+                conditional requests)
+
+        Returns:
+            Response body as bytes, or None on any failure.
+        """
+        try:
+            response = self._client.get(url, headers=headers)
+            response.raise_for_status()
+            return response.content
+        except Exception as e:
+            logger.warning(f"Binary download failed for {url}: {e}")
+            return None
+
+    def head(self, url: str, headers: dict | None = None) -> dict | None:
+        """
+        Best-effort HEAD request returning the response headers.
+
+        Used to revalidate a cached asset (ETag / Last-Modified) without
+        re-downloading its body. Never raises — returns None on any failure,
+        which callers treat as "can't revalidate, keep what we have".
+        """
+        try:
+            response = self._client.head(url, headers=headers)
+            response.raise_for_status()
+            return dict(response.headers)
+        except Exception as e:
+            logger.debug(f"HEAD request failed for {url}: {e}")
+            return None
+
     def close(self) -> None:
         """Close the HTTP client."""
         self._client.close()

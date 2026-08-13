@@ -551,15 +551,21 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         mode's signed_urls) has to land on disk first. Diagnostic mode's
         sketch_dir videos are already local and skip this entirely.
         """
+        content = self.service._http_client.download_binary(url)
+        if content is None:
+            logger.error(f"Failed to download video {url}")
+            return None
+        # Keep the source's real extension — GStreamer's decodebin sniffs the
+        # container itself, but a truthful suffix keeps the temp file readable
+        # in logs and lets any extension-based tooling behave sensibly.
+        suffix = os.path.splitext(urlparse(url).path)[1] or ".mov"
         try:
-            response = self.service._http_client._client.get(url)
-            response.raise_for_status()
-            fd, temp_path = tempfile.mkstemp(suffix=".mov")
+            fd, temp_path = tempfile.mkstemp(suffix=suffix)
             with os.fdopen(fd, "wb") as f:
-                f.write(response.content)
+                f.write(content)
             return temp_path
-        except Exception as e:
-            logger.error(f"Failed to download video {url}: {e}")
+        except OSError as e:
+            logger.error(f"Failed to write temp video file for {url}: {e}")
             return None
 
     def _load_static_image(self, image_path: str) -> None:
@@ -568,12 +574,13 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         if image_path.startswith("http://") or image_path.startswith("https://"):
             # Load from URL using httpx and GdkPixbuf
             logger.debug("Loading image from URL")
-            response = self.service._http_client._client.get(image_path)
-            response.raise_for_status()
+            content = self.service._http_client.download_binary(image_path)
+            if content is None:
+                raise RuntimeError(f"could not download image {image_path}")
 
             # Load image from bytes using GdkPixbuf
             loader = GdkPixbuf.PixbufLoader()
-            loader.write(response.content)
+            loader.write(content)
             loader.close()
             pixbuf = loader.get_pixbuf()
         else:
