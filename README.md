@@ -14,9 +14,12 @@ live, for both single-person and 2-person display. This moves the "pre-render ev
 person × scene combination" cost off the server: it stores one cutout pair per
 person, and the Pi composes on demand.
 
-- **New scene assets** under `data/base_scenes/{sau_single,sau_duo,fru_single,fru_duo}/`,
-  each a `scenes_config.json` plus background images. **These do not exist yet** — the
-  code degrades cleanly until they're supplied, composing nothing and falling back.
+- **New scene assets** under `data/base_scenes/{sau_single,sau_duo,fru_single,fru_duo}/`.
+  Placeholder `scenes_config.json` files are checked in — single-person values taken
+  from the server's own `app/sketch/scenes/{body,face}/crops.json`, duo variants
+  derived from them — but **no background images yet**. Until those are dropped in,
+  composition produces nothing and base mode falls back to the server's pre-composed
+  images. See `data/base_scenes/README.md` for the file formats.
 - **Duo display now works in base mode too**, not just diagnostic. If one of a pair
   has no usable assets, the other is shown alone rather than nothing.
 - **Caching:** fetched cutouts and composed slides live under
