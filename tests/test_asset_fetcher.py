@@ -258,6 +258,49 @@ def test_budget_respects_protected_dirs(tmp_path):
     assert not (tmp_path / "recent").exists()
 
 
+def test_budget_protects_a_dir_named_by_its_display_subdir(tmp_path):
+    """Callers hold the display/ path (that's the sketch_dir the slideshow
+    was handed), but eviction works on the person dir that contains it.
+    Protection has to bridge that, or the visitor currently on screen gets
+    deleted out from under the slideshow."""
+    old = _entry(tmp_path, "old", 500, 9000)
+    _entry(tmp_path, "recent", 500, 5)
+
+    enforce_disk_budget(tmp_path, 600 * 1024, protect={str(old / "display")})
+
+    assert old.exists()
+    assert not (tmp_path / "recent").exists()
+
+
+def test_budget_protects_duo_pair_by_display_subdir(tmp_path):
+    """Same bridging for a duo pair, which is evicted ahead of people."""
+    pair = _entry(tmp_path, "duo/a__b", 500, 5)
+    _entry(tmp_path, "person", 500, 9000)
+
+    enforce_disk_budget(tmp_path, 600 * 1024, protect={str(pair / "display")})
+
+    assert pair.exists()
+    assert not (tmp_path / "person").exists()
+
+
+def test_dir_size_counts_hardlinks_once(tmp_path):
+    """Videos are hardlinked raw/ -> display/. Charging both names would
+    overstate usage and evict people earlier than the cap requires."""
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    video = raw / "v.mov"
+    video.write_bytes(b"x" * 100_000)
+
+    display = tmp_path / "display"
+    link_videos_into([video], display)
+
+    # Hardlink only if the filesystem actually gave us one.
+    if (display / "v.mov").stat().st_ino == video.stat().st_ino:
+        assert _dir_size(tmp_path) == 100_000
+    else:  # pragma: no cover - copy fallback filesystem
+        assert _dir_size(tmp_path) == 200_000
+
+
 @pytest.mark.parametrize("cap", [0, -1])
 def test_budget_disabled_when_cap_not_positive(tmp_path, cap):
     _entry(tmp_path, "alice", 500, 10)

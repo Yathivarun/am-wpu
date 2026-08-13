@@ -330,14 +330,26 @@ def link_videos_into(videos: list[Path], display_dir: Path) -> int:
 # ─────────────────────────────────────────────────────────────────────────
 
 def _dir_size(path: Path) -> int:
-    """Total bytes under `path`. Unreadable entries count as 0."""
+    """Total bytes actually occupied under `path`. Unreadable entries count as 0.
+
+    Videos are hardlinked from raw/ into display/, so the same blocks appear
+    under two names. Counting each inode once keeps the budget honest instead
+    of double-charging every video and evicting sooner than necessary.
+    """
     total = 0
+    seen: set = set()
     for dirpath, _, filenames in os.walk(path):
         for name in filenames:
             try:
-                total += os.path.getsize(os.path.join(dirpath, name))
+                stat = os.stat(os.path.join(dirpath, name))
             except OSError:
-                pass
+                continue
+            if stat.st_nlink > 1:
+                key = (stat.st_dev, stat.st_ino)
+                if key in seen:
+                    continue
+                seen.add(key)
+            total += stat.st_size
     return total
 
 
@@ -366,8 +378,12 @@ def enforce_disk_budget(
     actually blows up) and each rebuilds cheaply from the per-person cutouts
     that are kept. Within each group, least-recently-used first.
 
-    `protect` holds directory paths that must not be evicted — whatever is
-    on screen right now. Returns the number of bytes reclaimed.
+    `protect` holds paths that must not be evicted — whatever is on screen
+    right now. An entry is spared when it is, or contains, a protected path,
+    so callers can pass either the person/pair dir or the display/ dir inside
+    it without having to know which granularity eviction works at.
+
+    Returns the number of bytes reclaimed.
     """
     protect = protect or set()
     if max_bytes <= 0 or not base_assets_dir.is_dir():
@@ -398,11 +414,16 @@ def enforce_disk_budget(
     # Duo pairs first, then whole person dirs; LRU within each group.
     ordered = candidates(duo_root) + candidates(base_assets_dir)
 
+    def _is_protected(entry: Path) -> bool:
+        """True if `entry` is, or contains, anything the caller pinned."""
+        entry_str = str(entry)
+        return any(p == entry_str or p.startswith(entry_str + os.sep) for p in protect)
+
     reclaimed = 0
     for entry in ordered:
         if total - reclaimed <= max_bytes:
             break
-        if str(entry) in protect:
+        if _is_protected(entry):
             continue
         size = _dir_size(entry)
         try:

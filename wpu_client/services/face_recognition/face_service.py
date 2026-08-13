@@ -974,7 +974,10 @@ class FaceRecognitionService(ServiceBase):
         sketch_dir = str(display_dir)
         self._base_single_cache[registration_id] = sketch_dir
         touch(assets_dir)
-        self._enforce_asset_budget(protect={sketch_dir})
+        # Pin this person's whole asset dir, not just display/ — eviction
+        # operates on the person dir, and deleting it would pull the slides
+        # out from under the slideshow that is about to show them.
+        self._enforce_asset_budget(protect={str(assets_dir)})
         return sketch_dir
 
     def _invalidate_duo_caches_for(self, registration_id: str) -> None:
@@ -1022,7 +1025,14 @@ class FaceRecognitionService(ServiceBase):
 
         sketch_dir = str(output_dir)
         touch(output_dir.parent)
-        self._enforce_asset_budget(protect={sketch_dir})
+        # Pin the pair dir itself, plus both people's dirs — the pair was
+        # composed from their cutouts and would have to refetch if evicted
+        # while still on screen.
+        self._enforce_asset_budget(protect={
+            str(output_dir.parent),
+            str(self._base_assets_dir(id_a)),
+            str(self._base_assets_dir(id_b)),
+        })
         return sketch_dir
 
     # ─────────────────────────────────────────────────────────────────────
