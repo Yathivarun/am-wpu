@@ -132,6 +132,19 @@ CAMERA_LORES_SIZE = (320, 240)       # live preview — full FOV, cheap to pull
 CAMERA_LORES_FORMAT = "YUV420"
 
 
+def _has_content(path: Path) -> bool:
+    """Whether `path` is a directory with at least one file in it.
+
+    Used to confirm a cached sketch_dir still exists before handing it out:
+    the base-asset disk cap can evict a directory that an in-memory cache
+    still points at.
+    """
+    try:
+        return path.is_dir() and any(path.iterdir())
+    except OSError:
+        return False
+
+
 class FaceRecognitionService(ServiceBase):
     """
     Face recognition service that continuously captures images,
@@ -924,8 +937,14 @@ class FaceRecognitionService(ServiceBase):
 
         cached = self._base_single_cache.get(registration_id)
         if cached:
-            touch(Path(cached).parent)
-            return cached
+            # The cap can evict a dir that's still in this cache, so a hit is
+            # only trusted while the files are actually there — otherwise fall
+            # through and rebuild rather than hand out a dangling path.
+            if _has_content(Path(cached)):
+                touch(Path(cached).parent)
+                return cached
+            logger.info(f"Cached slides for {registration_id} were evicted — rebuilding")
+            self._base_single_cache.pop(registration_id, None)
 
         assets_dir = self._base_assets_dir(registration_id)
         display_dir = assets_dir / DISPLAY_DIR_NAME
@@ -967,7 +986,7 @@ class FaceRecognitionService(ServiceBase):
 
         # Whatever ended up in display/ — composed slides, videos, or both —
         # is what the slideshow will show. Nothing there means nothing to show.
-        if not display_dir.is_dir() or not any(display_dir.iterdir()):
+        if not _has_content(display_dir):
             logger.info(f"No composed slides available for {registration_id}")
             return None
 
@@ -1020,7 +1039,7 @@ class FaceRecognitionService(ServiceBase):
                 FRU_DUO_DIR, FRU_DUO_CONFIG_PATH, output_dir,
             )
 
-        if not output_dir.is_dir() or not any(output_dir.iterdir()):
+        if not _has_content(output_dir):
             return None
 
         sketch_dir = str(output_dir)
@@ -1233,7 +1252,11 @@ class FaceRecognitionService(ServiceBase):
         """
         cached = self._duo_cache.get(pair_key)
         if cached:
-            return cached
+            if _has_content(Path(cached)):
+                return cached
+            # Evicted under the disk cap (pairs are evicted first) — drop the
+            # stale entry and recompose below.
+            self._duo_cache.pop(pair_key, None)
 
         if not self._diagnostic_mode:
             sketch_dir = self._build_base_duo_sketch_dir(entry_a, entry_b, id_a, id_b)
