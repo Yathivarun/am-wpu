@@ -41,6 +41,18 @@ Pending backend work, tracked as placeholders in config: the `gender` field on t
 exists server-side yet). Video fetching is best-effort and single-person only; a
 missing video never fails anything.
 
+Two deployment fixes found while bringing a Pi up on this branch:
+
+- **NumPy pinned to `1.26.4`.** `uv.lock` had resolved to 2.4.2, and the Pi's
+  `picamera2`/OpenCV are built against the NumPy 1.x C ABI — so a fresh install
+  died on import until `pip install --force-reinstall numpy==1.26.4` was run by
+  hand. Pinned in `pyproject.toml`, relocked, and pinned in CI so tests run
+  against the same NumPy that ships.
+- **Systemd units are no longer enabled or started by `setup.sh`.** A running
+  service holds the camera exclusively, which blocked `seed_face.py`, the
+  benchmarks and foreground `main.py` runs with an unhelpful error. Both units
+  install disabled; `scripts/switch-mode.sh` gained `stop` and `status`.
+
 ### 2026-07-11 — Repo reorganisation, dual-model cleanup, two systemd modes
 
 Restructured the repo for release packaging and fixed several latent bugs, without
@@ -268,9 +280,14 @@ chmod +rx scripts/setup.sh     # see note below
 
 Idempotent — installs apt system packages, creates a `--system-site-packages` venv
 (needed so `picamera2`/`gi` resolve from the system packages above), verifies the
-bundled models are present under `models/`, and installs + enables the
-`slideshow-server` systemd unit (leaving `slideshow-diagnostic` installed but
-disabled).
+bundled models are present under `models/`, and installs both systemd units.
+
+**Neither unit is enabled, and setup does not start anything.** Whichever service
+is running holds the Pi camera exclusively, so an auto-started one blocks
+`seed_face.py`, the benchmark scripts, `rpicam-*` and any manual `python main.py`
+run — surfacing as a confusing "camera unavailable" rather than an obvious cause.
+Start the mode you want when you want it (see **Switching modes** below), or
+`sudo systemctl enable --now slideshow-server.service` if you do want it on boot.
 
 The app can be unpacked anywhere and run as any user — `setup.sh` reads the actual
 directory, user, uid and session type off the device and substitutes them into the
@@ -301,10 +318,16 @@ step `[0/8]` then re-asserts sane modes across the rest of the tree.
 ```bash
 scripts/switch-mode.sh server      # online recognition via the registration server
 scripts/switch-mode.sh diagnostic  # offline recognition, local 3-person gallery
+scripts/switch-mode.sh stop        # stop both — releases the camera
+scripts/switch-mode.sh status      # report which (if either) is active
 ```
 
 The two systemd units declare `Conflicts=` on each other, so starting one always
-stops the other first — they never fight over the camera or display.
+stops the other first — they never fight over the camera or display. Neither is
+enabled at boot, so after a reboot nothing runs until you start it.
+
+Use `stop` before anything else that needs the camera — seeding a face, running a
+benchmark, or launching `main.py` in the foreground to watch its logs.
 
 ### Cutting a release
 

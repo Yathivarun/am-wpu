@@ -78,10 +78,30 @@ for unit in slideshow-server.service slideshow-diagnostic.service; do
 done
 sudo systemctl daemon-reload
 
-echo "[7/8] Enable server mode by default, leave diagnostic installed-but-disabled"
-sudo systemctl enable slideshow-server.service
-sudo systemctl disable slideshow-diagnostic.service || true
+echo "[7/8] Install both units DISABLED — neither starts on boot"
+# Deliberately not enabled and not started. Whichever unit is running holds the
+# Pi camera exclusively, so an auto-started service blocks seed_face.py, the
+# benchmark scripts, rpicam-*, and any manual `python main.py` run — with a
+# confusing "camera unavailable" rather than an obvious cause. Start the mode
+# you want, when you want it.
+sudo systemctl disable slideshow-server.service 2>/dev/null || true
+sudo systemctl disable slideshow-diagnostic.service 2>/dev/null || true
+sudo systemctl stop slideshow-server.service 2>/dev/null || true
+sudo systemctl stop slideshow-diagnostic.service 2>/dev/null || true
 
-echo "[8/8] (Re)start server service"
-sudo systemctl restart slideshow-server.service
-echo "Done. Switch modes with scripts/switch-mode.sh {server|diagnostic}"
+echo "[8/8] Setup complete — nothing is running yet"
+cat <<'EOF'
+Done. Both services are installed but disabled; the camera is free.
+
+Start a mode when you need it (each stops the other):
+    scripts/switch-mode.sh server        # online recognition via the server
+    scripts/switch-mode.sh diagnostic    # offline, local gallery
+    scripts/switch-mode.sh stop          # stop both, release the camera
+
+To run in the foreground with live logs instead (also needs the camera free):
+    .venv/bin/python main.py --service all              # server mode
+    .venv/bin/python main.py --service all --diagnostic # diagnostic mode
+
+To start on boot after all (not recommended while testing):
+    sudo systemctl enable --now slideshow-server.service
+EOF
