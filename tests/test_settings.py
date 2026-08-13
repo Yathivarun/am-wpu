@@ -78,3 +78,57 @@ def test_slideshow_default_sort_mode_is_alphabetical():
     # directories (README changelog, 2026-07-11) — the safe default matters.
     settings = Settings()
     assert settings.services.slideshow.sort_mode == "alphabetical"
+
+
+def test_base_mode_composition_defaults():
+    """Base mode must be on by default, with the cutout names the server
+    actually uploads today (<registration_id>/wpu/<name>)."""
+    face = Settings().services.face_recognition
+
+    assert face.sau_cutout_filename == "sau_cutout.png"
+    assert face.fru_cutout_filename == "fru_cutout.png"
+    assert face.video_filenames == ["video_1.mov", "video_2.mov", "video_3.mov"]
+    # The rollback valve defaults off, i.e. local composition is the live path.
+    assert face.use_legacy_final_images is False
+    assert face.base_assets_max_bytes == 5 * 1024 * 1024 * 1024
+
+
+def test_base_mode_fields_are_configurable(tmp_path):
+    """Filenames and endpoint are placeholders pending backend confirmation,
+    so they must be overridable from config.yaml."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "services": {
+                    "face_recognition": {
+                        "sau_cutout_filename": "body.png",
+                        "fru_cutout_filename": "face.png",
+                        "video_filenames": ["a.mp4"],
+                        "wpu_videos_endpoint": "http://server/v2/videos",
+                        "use_legacy_final_images": True,
+                        "base_assets_max_bytes": 1024,
+                    }
+                }
+            }
+        )
+    )
+
+    face = Settings.load(config_path).services.face_recognition
+    assert face.sau_cutout_filename == "body.png"
+    assert face.fru_cutout_filename == "face.png"
+    assert face.video_filenames == ["a.mp4"]
+    assert face.wpu_videos_endpoint == "http://server/v2/videos"
+    assert face.use_legacy_final_images is True
+    assert face.base_assets_max_bytes == 1024
+
+
+def test_example_config_matches_the_settings_schema():
+    """config/config.yaml.example is the documented template — it must stay
+    loadable as-is, so a documented key can't drift from the model."""
+    with open("config/config.yaml.example") as f:
+        settings = Settings(**yaml.safe_load(f))
+
+    face = settings.services.face_recognition
+    assert face.sau_cutout_filename == "sau_cutout.png"
+    assert face.use_legacy_final_images is False
