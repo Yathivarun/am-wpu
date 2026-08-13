@@ -169,6 +169,40 @@ class _GstVideoPlayer:
         self.pipeline = None
 
 
+def visitor_image_source(
+    sketch_dir: Optional[str],
+    diagnostic_mode: bool,
+    use_legacy_final_images: bool,
+) -> str:
+    """Where a visitor's slides should come from: "local", "server" or "none".
+
+    Asset-driven rather than mode-driven: whenever locally-composed slides
+    exist for this person, they win. That covers diagnostic mode (sketch_dir
+    set on a gallery match) and base mode (sketch_dir populated by local
+    SAU/FRU composition).
+
+    Two rules override that:
+
+    * `use_legacy_final_images` is the rollback valve — it must force the
+      server path even when local slides exist, or flipping it would do
+      nothing.
+    * Diagnostic mode is OFFLINE by definition and must never reach for the
+      server, not even as a fallback. The common way to end up with no local
+      slides there is an unrecognized face, whose sketch_dir is always None;
+      falling through to the server would fire on every unknown visitor and
+      stall the calling (recognition) thread for timeout x max_retries with
+      nothing to show for it.
+    """
+    if diagnostic_mode:
+        has_local = bool(sketch_dir) and os.path.isdir(sketch_dir)
+        return "local" if has_local and not use_legacy_final_images else "none"
+    if use_legacy_final_images:
+        return "server"
+    if sketch_dir and os.path.isdir(sketch_dir):
+        return "local"
+    return "server"
+
+
 def _video_suffixes(config) -> tuple[str, ...]:
     """Lowercase file extensions (e.g. '.mov') from config.video_extensions'
     glob patterns (e.g. '*.mov'), for extension-based video/image routing."""
@@ -956,21 +990,23 @@ class SlideshowApp(Gtk.Application):
             f"(registration_id: {registration_id}, sketches: {sketch_dir})"
         )
 
-        # Asset-driven, not mode-driven: whenever locally-composed slides
-        # exist for this person, show them. That covers diagnostic mode (its
-        # sketch_dir is always set on a gallery match) and base mode (whose
-        # sketch_dir is now populated by local SAU/FRU composition). Only
-        # when there's nothing local — composition failed, assets weren't
-        # available, or the legacy valve is on — does this fall back to
-        # fetching the server's pre-composed final images.
-        if (
-            sketch_dir
-            and os.path.isdir(sketch_dir)
-            and not self.service.use_legacy_final_images
-        ):
+        # See visitor_image_source() for the full policy, including why
+        # diagnostic mode must never fall through to the server.
+        source = visitor_image_source(
+            sketch_dir,
+            self.service.diagnostic_mode,
+            self.service.use_legacy_final_images,
+        )
+        if source == "local":
             visitor_images = self._load_person_sketches(sketch_dir)
-        else:
+        elif source == "server":
             visitor_images = self._fetch_visitor_images(registration_id)
+        else:
+            logger.info(
+                f"No local slides for {person_name} and the server is not an "
+                f"option in this mode — staying on stock images"
+            )
+            visitor_images = []
 
         if not visitor_images:
             logger.warning(
