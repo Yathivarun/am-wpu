@@ -41,6 +41,33 @@ services:
     # Point these at your registration server.
     api_endpoint: "http://localhost:8000/api/v1/identify/"
     wpu_endpoint: "http://localhost:8000/api/v1/wpu/images"
+
+    # ── Base-mode local composition ───────────────────────────────────────
+    # In base (server-recognition) mode the Pi no longer downloads finished
+    # images. It fetches two raw alpha cutouts per person from wpu_endpoint —
+    # a body cutout (SAU) and a face cutout (FRU) — and composes them locally
+    # onto the backgrounds in data/base_scenes/, for both single-person and
+    # 2-person display. Composed output is cached under data/base_assets/.
+    #
+    # PLACEHOLDERS, pending backend confirmation: the cutout filenames below
+    # match what the server uploads today, and the video filenames/endpoint
+    # are unconfirmed guesses — no video route exists server-side yet. All
+    # asset fetching is best-effort: anything missing is simply skipped and
+    # never fails the display.
+    sau_cutout_filename: "sau_cutout.png"
+    fru_cutout_filename: "fru_cutout.png"
+    video_filenames:
+      - "video_1.mov"
+      - "video_2.mov"
+      - "video_3.mov"
+    wpu_videos_endpoint: "http://localhost:8000/api/v1/wpu/videos"
+    # Rollback valve: set true to go back to displaying the server's
+    # pre-composed final images and skip local composition entirely.
+    use_legacy_final_images: false
+    # Disk budget for data/base_assets. Composed slides are regenerable, so
+    # once this is exceeded the least-recently-used entries are evicted —
+    # duo pairs first (they grow quadratically with visitor count).
+    base_assets_max_bytes: 5368709120  # 5 GB
     detection_interval: 1  # seconds between captures
     min_face_size: 100  # minimum face size in pixels
     display_result: true  # show result on screen overlay

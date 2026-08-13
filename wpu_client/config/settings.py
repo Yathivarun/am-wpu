@@ -41,6 +41,37 @@ class FaceRecognitionConfig(BaseModel):
     # api_endpoint: str = "http://10.2.135.25:8000/api/v1/identify"
     wpu_endpoint: str = "http://localhost:8000/api/v1/wpu/images"
     detection_interval: int = 5  # seconds between captures
+
+    # ── Base-mode local composition ─────────────────────────────────────
+    # Base (server-recognition) mode composes each visitor's slides ON THE PI
+    # from two raw alpha cutouts the server serves via wpu_endpoint — a body
+    # cutout ("SAU") and a face cutout ("FRU") — instead of downloading
+    # pre-composed final images. Backgrounds/placement come from the local
+    # data/base_scenes/ configs.
+    #
+    # The two cutout filenames below match what the server currently uploads
+    # (<registration_id>/wpu/<name>); they are configurable because the
+    # backend may rename them. Videos are single-person only and entirely
+    # best-effort — a missing video is never an error.
+    sau_cutout_filename: str = "sau_cutout.png"
+    fru_cutout_filename: str = "fru_cutout.png"
+    video_filenames: list[str] = Field(
+        default_factory=lambda: ["video_1.mov", "video_2.mov", "video_3.mov"]
+    )
+    # PLACEHOLDER — no video route exists server-side yet. Fetches from it fail
+    # harmlessly (best-effort) until the real URL is confirmed with the backend.
+    wpu_videos_endpoint: str = "http://localhost:8000/api/v1/wpu/videos"
+    # Rollback valve: True restores the old behaviour of displaying the
+    # server's pre-composed final images fetched from wpu_endpoint, skipping
+    # local composition entirely. One config flip, no redeploy.
+    use_legacy_final_images: bool = False
+    # Disk budget for data/base_assets (fetched cutouts + composed slides +
+    # videos). Composed output is regenerable, so once this is exceeded the
+    # least-recently-used entries are evicted — duo pairs first, since they
+    # grow quadratically with visitor count and rebuild from the retained
+    # per-person cutouts.
+    base_assets_max_bytes: int = 5 * 1024 * 1024 * 1024  # 5 GB
+
     min_face_size: int = 100  # minimum face size in pixels
     display_result: bool = True  # show result on screen overlay
     overlay_hide_delay: int = 3  # seconds to hide overlay
