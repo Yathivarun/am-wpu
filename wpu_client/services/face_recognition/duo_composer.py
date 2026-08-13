@@ -16,6 +16,12 @@ Output:
 If the output directory already exists and is non-empty, composition is
 skipped and the existing files are reused (on-disk cache across restarts,
 in addition to the in-memory cache in face_service.py).
+
+`compose_duo` itself stays the diagnostic-mode entry point. Its building
+blocks (`load_alpha_bgra`, `detect_eye_kps`, `warp_and_blend_face`,
+`pick_alpha_image`) are public because base_composer.py reuses them for
+base-mode SAU/FRU composition — the geometry is identical, only the inputs
+and output directories differ.
 """
 
 import json
@@ -29,7 +35,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
-def _load_alpha_bgra(path: Path) -> np.ndarray | None:
+def load_alpha_bgra(path: Path) -> np.ndarray | None:
     img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     if img is None:
         return None
@@ -52,7 +58,7 @@ def pick_alpha_image(alpha_dir: str) -> Path | None:
     return files[0] if files else None
 
 
-def _detect_eye_kps(detector: cv2.FaceDetectorYN, face_bgr: np.ndarray) -> np.ndarray | None:
+def detect_eye_kps(detector: cv2.FaceDetectorYN, face_bgr: np.ndarray) -> np.ndarray | None:
     """Row layout: [x,y,w,h, 5x(lm_x,lm_y), score]; first two landmarks = eyes."""
     h, w = face_bgr.shape[:2]
     detector.setInputSize((w, h))
@@ -63,7 +69,7 @@ def _detect_eye_kps(detector: cv2.FaceDetectorYN, face_bgr: np.ndarray) -> np.nd
     return np.asarray(best[4:8], dtype=np.float32).reshape(2, 2)
 
 
-def _warp_and_blend_face(
+def warp_and_blend_face(
     scene_bgra: np.ndarray,
     face_bgra: np.ndarray,
     face_kps: np.ndarray,
@@ -138,8 +144,8 @@ def compose_duo(
         logger.warning(f"Duo scenes config not found: {scenes_config_path}")
         return None
 
-    face_a_bgra = _load_alpha_bgra(face_a_path)
-    face_b_bgra = _load_alpha_bgra(face_b_path)
+    face_a_bgra = load_alpha_bgra(face_a_path)
+    face_b_bgra = load_alpha_bgra(face_b_path)
     if face_a_bgra is None or face_b_bgra is None:
         logger.warning(
             f"Duo compose: could not read alpha face(s) "
@@ -148,8 +154,8 @@ def compose_duo(
         )
         return None
 
-    kps_a = _detect_eye_kps(detector, face_a_bgra[:, :, :3])
-    kps_b = _detect_eye_kps(detector, face_b_bgra[:, :, :3])
+    kps_a = detect_eye_kps(detector, face_a_bgra[:, :, :3])
+    kps_b = detect_eye_kps(detector, face_b_bgra[:, :, :3])
     if kps_a is None or kps_b is None:
         logger.warning("Duo compose: could not detect eyes in one or both alpha faces")
         return None
@@ -177,17 +183,17 @@ def compose_duo(
         if anchor_a is None or anchor_b is None:
             continue
 
-        scene = _load_alpha_bgra(scene_file)
+        scene = load_alpha_bgra(scene_file)
         if scene is None:
             continue
 
-        _warp_and_blend_face(
+        warp_and_blend_face(
             scene, face_a_bgra, kps_a,
             tuple(anchor_a["target_eye_midpoint"]),
             anchor_a["target_eye_distance"],
             anchor_a["target_tilt_angle"],
         )
-        _warp_and_blend_face(
+        warp_and_blend_face(
             scene, face_b_bgra, kps_b,
             tuple(anchor_b["target_eye_midpoint"]),
             anchor_b["target_eye_distance"],
