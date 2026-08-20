@@ -173,6 +173,7 @@ def visitor_image_source(
     sketch_dir: Optional[str],
     diagnostic_mode: bool,
     use_legacy_final_images: bool,
+    unrecognized: bool = False,
 ) -> str:
     """Where a visitor's slides should come from: "local", "server" or "none".
 
@@ -192,13 +193,23 @@ def visitor_image_source(
       falling through to the server would fire on every unknown visitor and
       stall the calling (recognition) thread for timeout x max_retries with
       nothing to show for it.
+    * An unrecognized face has no registration at all — it is tracked under a
+      generated "__unrecognized__<hex>" pseudo-id, which no endpoint can ever
+      resolve. Asking anyway is a guaranteed-failing round trip on the
+      recognition thread, and the server answers it with a 500 (the pseudo-id
+      isn't a UUID), so it also fills the server's logs with false alarms.
+      This applies in base mode too, not just diagnostic.
     """
+    has_local = bool(sketch_dir) and os.path.isdir(sketch_dir)
     if diagnostic_mode:
-        has_local = bool(sketch_dir) and os.path.isdir(sketch_dir)
         return "local" if has_local and not use_legacy_final_images else "none"
+    if unrecognized:
+        # Never the server: there is nothing there under a pseudo-id. Local
+        # slides are still honoured if something ever assigns them.
+        return "local" if has_local else "none"
     if use_legacy_final_images:
         return "server"
-    if sketch_dir and os.path.isdir(sketch_dir):
+    if has_local:
         return "local"
     return "server"
 
@@ -935,22 +946,27 @@ class SlideshowApp(Gtk.Application):
         return image_files
 
     def _fetch_visitor_images(self, registration_id: str) -> list[str]:
-        """Fetch visitor WPU images from the API."""
-        try:
-            logger.info(f"Fetching WPU images for registration_id: {registration_id}")
-            response_data = self.http_client.get(
-                self.wpu_endpoint,
-                params={"registration_id": registration_id}
-            )
+        """Fetch visitor WPU images from the API.
 
-            # The API returns a dict with "signed_urls" key containing list of URLs
-            images = response_data.get("signed_urls", [])
-            logger.info(f"Fetched {len(images)} WPU images for visit {registration_id}")
-            return images
-
-        except Exception as e:
-            logger.error(f"Failed to fetch WPU images for visit {registration_id}: {e}")
+        Single attempt, never raises. This runs synchronously on the
+        recognition thread (the person.detected handler), so retrying a
+        failure would stall detection for timeout x max_retries while the
+        visitor is still standing there — and the overwhelmingly common
+        failure is a definitive one (no images for this registration) that
+        no amount of retrying will change.
+        """
+        logger.info(f"Fetching WPU images for registration_id: {registration_id}")
+        response_data = self.http_client.get_json_once(
+            self.wpu_endpoint, params={"registration_id": registration_id}
+        )
+        if not response_data:
+            logger.info(f"No WPU images available for visit {registration_id}")
             return []
+
+        # The API returns a dict with "signed_urls" key containing list of URLs
+        images = response_data.get("signed_urls", [])
+        logger.info(f"Fetched {len(images)} WPU images for visit {registration_id}")
+        return images
 
     def _load_person_sketches(self, sketch_dir: str) -> list[str]:
         """This person's locally-available slides, images and videos together.
@@ -996,6 +1012,7 @@ class SlideshowApp(Gtk.Application):
             sketch_dir,
             self.service.diagnostic_mode,
             self.service.use_legacy_final_images,
+            unrecognized=unrecognized,
         )
         if source == "local":
             visitor_images = self._load_person_sketches(sketch_dir)

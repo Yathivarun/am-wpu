@@ -77,3 +77,31 @@ def test_diagnostic_mode_never_returns_server_in_any_combination(tmp_path, slide
     for sketch_dir in (None, "", slides, str(tmp_path / "absent")):
         for legacy in (False, True):
             assert visitor_image_source(sketch_dir, True, legacy) != "server"
+
+
+# ── Unrecognized faces ──────────────────────────────────────────────────
+
+
+def test_unrecognized_face_never_reaches_the_server():
+    """An unrecognized face is tracked under a generated
+    "__unrecognized__<hex>" pseudo-id that no endpoint can resolve. Asking
+    anyway is a guaranteed-failing round trip on the recognition thread, and
+    the server answers a non-UUID id with a 500 — observed in a live Pi run
+    firing on every unknown visitor."""
+    assert visitor_image_source(None, False, False, unrecognized=True) == "none"
+
+
+def test_unrecognized_face_ignores_the_legacy_valve():
+    """The rollback valve switches where RECOGNISED people's slides come
+    from; it can't conjure a registration for someone who has none."""
+    assert visitor_image_source(None, False, True, unrecognized=True) == "none"
+
+
+def test_unrecognized_face_still_shows_local_slides_if_any(slides):
+    """Nothing assigns these today (sketch_dir is always None for unknown
+    faces), but honouring them keeps the rule 'local wins when it exists'."""
+    assert visitor_image_source(slides, False, False, unrecognized=True) == "local"
+
+
+def test_recognised_person_is_unaffected():
+    assert visitor_image_source(None, False, False, unrecognized=False) == "server"
