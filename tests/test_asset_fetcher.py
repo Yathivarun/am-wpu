@@ -24,36 +24,59 @@ from wpu_client.services.face_recognition.asset_fetcher import (
 )
 
 RID = "reg-123"
-IMAGES_URL = "http://api/wpu/images"
-VIDEOS_URL = "http://api/wpu/videos"
-OBJECT_BASE = f"http://minio/visits/{RID}/wpu"
+IMAGES_URL = "http://api/v1/wpu/images"
+MEDIA_URL = "http://api/v1/sau/media"
+OBJECT_BASE = f"http://minio/visits/{RID}"
+
+# The server stores videos under generated UUID keys — the capture station's
+# filename is gone, which is exactly why they're resolved by position.
+VIDEO_KEYS = [
+    f"{OBJECT_BASE}/sau/6f1c0a1e-0000-4000-8000-000000000001.mov",
+    f"{OBJECT_BASE}/sau/6f1c0a1e-0000-4000-8000-000000000002.mov",
+]
 
 
 class FakeHTTP:
-    """Minimal stand-in for HTTPClient covering the three methods used."""
+    """Minimal stand-in for HTTPClient covering the methods used."""
 
-    def __init__(self, etag='"v1"', videos=False, offline=False):
+    def __init__(self, etag='"v1"', videos=0, offline=False, labelled=True):
         self.etag = etag
         self.videos = videos
         self.offline = offline
+        self.labelled = labelled
         self.downloads = 0
         self.heads = 0
 
-    def get(self, url, params=None, headers=None):
+    def get_json_once(self, url, params=None, headers=None):
         if self.offline:
-            raise RuntimeError("network unreachable")
-        if "videos" in url:
+            return None
+        if "/sau/media" in url:
+            assert url.endswith(f"/{RID}"), "registration id belongs in the path"
             if not self.videos:
-                raise RuntimeError("404 — no such route")
-            return {"signed_urls": [f"{OBJECT_BASE}/video_1.mov"]}
-        return {
+                return None  # 404 — registration has no SAU media
+            urls = VIDEO_KEYS[: self.videos]
+            return {
+                "image1_url": f"{OBJECT_BASE}/sau/img.jpg",
+                "image2_url": None,
+                "image3_url": None,
+                "video_url": urls[0],
+                "video_urls": urls,
+            }
+        assert params == {"registration_id": RID}
+        sau = f"{OBJECT_BASE}/wpu/sau_cutout.png"
+        fru = f"{OBJECT_BASE}/wpu/fru_cutout.png"
+        body = {
             "signed_urls": [
-                f"{OBJECT_BASE}/sau_cutout.png",
-                f"{OBJECT_BASE}/fru_cutout.png",
+                sau,
+                fru,
                 # An unrelated object that must not match any configured name.
-                f"{OBJECT_BASE}/scene_1.png",
+                f"{OBJECT_BASE}/wpu/scene_1.png",
             ]
         }
+        if self.labelled:
+            body["sau_signed_url"] = sau
+            body["fru_signed_url"] = fru
+        return body
 
     def head(self, url, headers=None):
         self.heads += 1
@@ -66,10 +89,10 @@ class FakeHTTP:
         return b"BYTES-" + self.etag.encode()
 
 
-def _fetch(http, assets_dir, videos=("video_1.mov",)):
+def _fetch(http, assets_dir, video_count=1):
     return fetch_person_assets(
-        http, IMAGES_URL, VIDEOS_URL, RID,
-        "sau_cutout.png", "fru_cutout.png", list(videos), assets_dir,
+        http, IMAGES_URL, MEDIA_URL, RID,
+        "sau_cutout.png", "fru_cutout.png", video_count, assets_dir,
     )
 
 
@@ -125,24 +148,93 @@ def test_offline_new_person_degrades_to_nothing(tmp_path):
     assert result["videos"] == []
 
 
-def test_missing_videos_endpoint_is_not_an_error(tmp_path):
-    """No video route exists server-side yet — this is the normal path."""
-    result = _fetch(FakeHTTP(videos=False), tmp_path)
+def test_registration_without_video_is_not_an_error(tmp_path):
+    """A registration with no SAU media 404s — a normal outcome, not a fault."""
+    result = _fetch(FakeHTTP(videos=0), tmp_path)
     assert result["videos"] == []
     assert result["sau"] is not None  # cutouts still fetched fine
 
 
-def test_videos_fetched_when_available(tmp_path):
-    result = _fetch(FakeHTTP(videos=True), tmp_path)
+def test_composited_video_fetched_by_position(tmp_path):
+    """Only video_urls[0] — the composited clip — with video_count=1, even
+    though the server offered two and neither URL carries a usable name."""
+    result = _fetch(FakeHTTP(videos=2), tmp_path, video_count=1)
+    assert [p.name for p in result["videos"]] == ["video_1.mov"]
+    assert result["videos"][0].read_bytes() == b'BYTES-"v1"'
+
+
+def test_video_count_takes_the_first_n(tmp_path):
+    result = _fetch(FakeHTTP(videos=2), tmp_path, video_count=3)
+    assert [p.name for p in result["videos"]] == ["video_1.mov", "video_2.mov"]
+
+
+def test_video_count_zero_skips_the_media_call(tmp_path):
+    class NoVideos(FakeHTTP):
+        def get_json_once(self, url, params=None, headers=None):
+            assert "/sau/media" not in url, "must not query media when disabled"
+            return super().get_json_once(url, params=params, headers=headers)
+
+    result = _fetch(NoVideos(videos=2), tmp_path, video_count=0)
+    assert result["videos"] == []
+
+
+def test_disabling_videos_discards_the_cached_ones(tmp_path):
+    """0 must mean off, not 'keep serving whatever is already on disk' — the
+    offline fallback that reuses cached videos must not resurrect them."""
+    _fetch(FakeHTTP(videos=1), tmp_path, video_count=1)
+    assert (tmp_path / "raw" / "video_1.mov").exists()
+
+    result = _fetch(FakeHTTP(videos=1), tmp_path, video_count=0)
+    assert result["videos"] == []
+    assert not (tmp_path / "raw" / "video_1.mov").exists()
+
+
+def test_legacy_scalar_video_url_still_works(tmp_path):
+    """A server predating the video_urls list returns only the scalar."""
+
+    class ScalarOnly(FakeHTTP):
+        def get_json_once(self, url, params=None, headers=None):
+            data = super().get_json_once(url, params=params, headers=headers)
+            if data and "video_url" in data:
+                data.pop("video_urls")
+            return data
+
+    result = _fetch(ScalarOnly(videos=2), tmp_path)
     assert [p.name for p in result["videos"]] == ["video_1.mov"]
 
 
-def test_manifest_records_every_configured_asset(tmp_path):
-    _fetch(FakeHTTP(), tmp_path, videos=("video_1.mov", "video_2.mov"))
+def test_lowering_video_count_prunes_the_extras(tmp_path):
+    _fetch(FakeHTTP(videos=2), tmp_path, video_count=2)
+    assert (tmp_path / "raw" / "video_2.mov").exists()
+
+    result = _fetch(FakeHTTP(videos=2), tmp_path, video_count=1)
+    assert [p.name for p in result["videos"]] == ["video_1.mov"]
+    assert not (tmp_path / "raw" / "video_2.mov").exists()
+    assert "video_2" not in json.loads((tmp_path / "manifest.json").read_text())
+
+
+def test_offline_keeps_previously_fetched_video(tmp_path):
+    """The media listing failing must not drop a video already on disk."""
+    _fetch(FakeHTTP(videos=1), tmp_path)
+    result = _fetch(FakeHTTP(videos=1, offline=True), tmp_path)
+    assert [p.name for p in result["videos"]] == ["video_1.mov"]
+
+
+def test_cutouts_resolved_from_unlabelled_list(tmp_path):
+    """Fallback path: an older server returns signed_urls with no labels."""
+    http = FakeHTTP(labelled=False)
+    result = _fetch(http, tmp_path)
+    assert result["sau"].name == "sau.png"
+    assert result["fru"].name == "fru.png"
+    assert http.downloads == 2  # scene_1.png matched nothing
+
+
+def test_manifest_records_every_fetched_asset(tmp_path):
+    _fetch(FakeHTTP(videos=2), tmp_path, video_count=2)
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert sorted(manifest) == ["fru", "sau", "video_1", "video_2"]
     assert manifest["sau"]["present"] is True
-    assert manifest["video_1"]["present"] is False
+    assert manifest["video_1"]["present"] is True
 
 
 def test_corrupt_manifest_is_survivable(tmp_path):
@@ -156,7 +248,7 @@ def test_fetch_never_raises_on_a_broken_client(tmp_path):
     """This runs on the recognition loop — it must not take the loop down."""
 
     class Exploding:
-        def get(self, *a, **k):
+        def get_json_once(self, *a, **k):
             raise RuntimeError("boom")
 
         def head(self, *a, **k):

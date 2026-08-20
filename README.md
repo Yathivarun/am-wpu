@@ -36,12 +36,27 @@ person, and the Pi composes on demand.
 - **Diagnostic mode is unchanged** — its duo feature (`data/duo_scenes/`,
   `data/duo_output/`, `compose_duo`) shares no assets or code path with the above.
 
-Pending backend work, tracked as placeholders in config: the `gender` field on the
-`/identify` response, and the videos endpoint (`wpu_videos_endpoint` — no such route
-exists server-side yet). Video fetching is best-effort and single-person only; a
-missing video never fails anything.
+Pending backend work, tracked as a placeholder in config: the `gender` field on the
+`/identify` response.
 
-Two deployment fixes found while bringing a Pi up on this branch:
+Three deployment fixes found while bringing a Pi up on this branch:
+
+- **SAU video fetching wired up to the real route.** It was pointed at a
+  `/api/v1/wpu/videos` that never existed, so every first recognition spent
+  retries on a dead localhost URL and silently showed no video. Videos now come
+  from `GET /api/v1/sau/media/<registration_id>` (`sau_media_endpoint`), which
+  takes the id as a **path** segment and returns `video_urls` — and they are
+  picked **by position**, not by filename: the server stores every upload under a
+  generated `{uuid}{ext}` key, so the capture station's name never reaches us.
+  `video_urls[0]` is the composited clip, and `video_count` (default 1) says how
+  many to take. Cutouts, by contrast, are now read from the labelled
+  `sau_signed_url`/`fru_signed_url` fields, with filename matching kept only as a
+  fallback for older servers. Asset listings also stopped using the retrying
+  `get()`: a registration with no SAU media legitimately 404s, and retrying that
+  three times stalled the recognition thread for 30s per visitor.
+- **All endpoint defaults point at the live cluster (`192.168.1.19:8000`).** The
+  video endpoint had been left on `localhost` while everything else was moved,
+  which is what hid the breakage above.
 
 - **NumPy pinned to `1.26.4`.** `uv.lock` had resolved to 2.4.2, and the Pi's
   `picamera2`/OpenCV are built against the NumPy 1.x C ABI — so a fresh install

@@ -106,6 +106,36 @@ class HTTPClient:
         logger.error(f"All retry attempts failed for {url}")
         raise last_error
 
+    def get_json_once(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+    ) -> dict | None:
+        """
+        Best-effort single-attempt GET returning the decoded JSON body.
+
+        The asset listing endpoints are queried from the recognition thread,
+        and a registration with no SAU media legitimately 404s. Going through
+        get() would spend max_retries × timeout (30s by default) re-asking a
+        question the server has already answered definitively, stalling
+        recognition for every such visitor. One attempt, no retry, never
+        raises — a failure just means "no assets this time", and the next
+        recognition of the same person tries again anyway.
+
+        Returns:
+            The decoded JSON object, or None on any failure (network error,
+            non-2xx status, non-JSON body).
+        """
+        try:
+            response = self._client.get(url, params=params, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, dict) else None
+        except Exception as e:
+            logger.info(f"Asset listing unavailable at {url}: {e}")
+            return None
+
     def download_binary(
         self,
         url: str,

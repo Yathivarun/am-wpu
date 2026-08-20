@@ -37,9 +37,10 @@ class FaceRecognitionConfig(BaseModel):
     # (distilled MobileFaceNet 512-D → server's auraface gallery). Selects both
     # the on-device embedder and the gallery the identify request queries.
     model: str = "sface"
-    api_endpoint: str = "http://localhost:8000/api/v1/identify/"
-    # api_endpoint: str = "http://10.2.135.25:8000/api/v1/identify"
-    wpu_endpoint: str = "http://localhost:8000/api/v1/wpu/images"
+    # Live cluster host. Every endpoint below points at the same server; only
+    # the host needs changing for a different deployment.
+    api_endpoint: str = "http://192.168.1.19:8000/api/v1/identify/"
+    wpu_endpoint: str = "http://192.168.1.19:8000/api/v1/wpu/images"
     detection_interval: int = 5  # seconds between captures
 
     # ── Base-mode local composition ─────────────────────────────────────
@@ -49,18 +50,24 @@ class FaceRecognitionConfig(BaseModel):
     # pre-composed final images. Backgrounds/placement come from the local
     # data/base_scenes/ configs.
     #
-    # The two cutout filenames below match what the server currently uploads
-    # (<registration_id>/wpu/<name>); they are configurable because the
-    # backend may rename them. Videos are single-person only and entirely
-    # best-effort — a missing video is never an error.
+    # The server labels the two cutouts explicitly in its response; these
+    # filenames are only the fallback used to pick them out of the older
+    # unlabelled `signed_urls` list, and match what it uploads today
+    # (<registration_id>/wpu/<name>).
     sau_cutout_filename: str = "sau_cutout.png"
     fru_cutout_filename: str = "fru_cutout.png"
-    video_filenames: list[str] = Field(
-        default_factory=lambda: ["video_1.mov", "video_2.mov", "video_3.mov"]
-    )
-    # PLACEHOLDER — no video route exists server-side yet. Fetches from it fail
-    # harmlessly (best-effort) until the real URL is confirmed with the backend.
-    wpu_videos_endpoint: str = "http://localhost:8000/api/v1/wpu/videos"
+
+    # SAU videos. Base of the media route — the registration id is appended as
+    # a path segment (/api/v1/sau/media/<registration_id>), unlike every other
+    # endpoint here, which takes it as a query param.
+    #
+    # Videos are identified by POSITION, not by name: the server stores each
+    # upload under a generated {uuid}{ext} key, so the capture station's
+    # filename never reaches us. The station uploads the composited clip
+    # first, so video_count=1 takes exactly that one and skips the raw
+    # captures behind it. Raise it only to show those too.
+    sau_media_endpoint: str = "http://192.168.1.19:8000/api/v1/sau/media"
+    video_count: int = 1
     # Rollback valve: True restores the old behaviour of displaying the
     # server's pre-composed final images fetched from wpu_endpoint, skipping
     # local composition entirely. One config flip, no redeploy.

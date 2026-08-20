@@ -87,15 +87,30 @@ def test_base_mode_composition_defaults():
 
     assert face.sau_cutout_filename == "sau_cutout.png"
     assert face.fru_cutout_filename == "fru_cutout.png"
-    assert face.video_filenames == ["video_1.mov", "video_2.mov", "video_3.mov"]
+    # Just the composited clip (video_urls[0]), not the raw captures behind it.
+    assert face.video_count == 1
     # The rollback valve defaults off, i.e. local composition is the live path.
     assert face.use_legacy_final_images is False
     assert face.base_assets_max_bytes == 5 * 1024 * 1024 * 1024
 
 
+def test_endpoint_defaults_point_at_the_live_cluster():
+    """All three endpoints must default to the same host — a half-updated set
+    is how the video route ended up pointing at localhost while the rest of
+    the client talked to the cluster."""
+    face = Settings().services.face_recognition
+    hosts = {
+        face.api_endpoint.split("/")[2],
+        face.wpu_endpoint.split("/")[2],
+        face.sau_media_endpoint.split("/")[2],
+    }
+    assert hosts == {"192.168.1.19:8000"}
+    # Path param, not a query one: the id is appended as a path segment.
+    assert face.sau_media_endpoint.endswith("/api/v1/sau/media")
+
+
 def test_base_mode_fields_are_configurable(tmp_path):
-    """Filenames and endpoint are placeholders pending backend confirmation,
-    so they must be overridable from config.yaml."""
+    """Cutout names and endpoints must be overridable from config.yaml."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         yaml.dump(
@@ -104,8 +119,8 @@ def test_base_mode_fields_are_configurable(tmp_path):
                     "face_recognition": {
                         "sau_cutout_filename": "body.png",
                         "fru_cutout_filename": "face.png",
-                        "video_filenames": ["a.mp4"],
-                        "wpu_videos_endpoint": "http://server/v2/videos",
+                        "video_count": 3,
+                        "sau_media_endpoint": "http://server/v2/sau/media",
                         "use_legacy_final_images": True,
                         "base_assets_max_bytes": 1024,
                     }
@@ -117,8 +132,8 @@ def test_base_mode_fields_are_configurable(tmp_path):
     face = Settings.load(config_path).services.face_recognition
     assert face.sau_cutout_filename == "body.png"
     assert face.fru_cutout_filename == "face.png"
-    assert face.video_filenames == ["a.mp4"]
-    assert face.wpu_videos_endpoint == "http://server/v2/videos"
+    assert face.video_count == 3
+    assert face.sau_media_endpoint == "http://server/v2/sau/media"
     assert face.use_legacy_final_images is True
     assert face.base_assets_max_bytes == 1024
 

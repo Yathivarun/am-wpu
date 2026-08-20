@@ -9,13 +9,28 @@ half.
 
 Layout per person (assets_dir = data/base_assets/<registration_id>/):
     raw/            sau.png, fru.png, video_1.mov, ...  (whichever fetched)
-    manifest.json   per-asset fetch state — see _Manifest below
+    manifest.json   per-asset fetch state
     display/        composed slides + hardlinked videos (written by the caller)
 
 Everything here is BEST-EFFORT by design. A missing cutout, an unreachable
-server, a 404 on the (not-yet-existing) videos endpoint — all are normal
-outcomes that are logged and skipped, never raised. A visitor with no usable
-assets simply produces no composed slides, and the caller falls back.
+server, a registration with no SAU video — all are normal outcomes that are
+logged and skipped, never raised. A visitor with no usable assets simply
+produces no composed slides, and the caller falls back.
+
+Two endpoints, two very different identification schemes
+────────────────────────────────────────────────────────
+Cutouts come from `GET <wpu_endpoint>?registration_id=…`, which labels them
+(`sau_signed_url` / `fru_signed_url`) and also returns the older flat
+`signed_urls` list. Labels win; the flat list is matched by filename suffix
+only as a fallback, which works because the server writes cutouts to fixed,
+named keys (`<registration_id>/wpu/sau_cutout.png`).
+
+Videos come from `GET <sau_media_endpoint>/<registration_id>` — a PATH
+param, a different response shape, and crucially **positional**: the server
+stores every upload under a generated `{uuid}{ext}` key, so the original
+filename is gone by the time a URL reaches us and there is nothing to match
+on. The capture station uploads the composited clip first, so `video_urls[0]`
+(== the legacy scalar `video_url`) is the one worth showing.
 
 Cache freshness
 ───────────────
@@ -49,6 +64,14 @@ DISPLAY_DIR_NAME = "display"
 SAU_LOCAL_NAME = "sau.png"
 FRU_LOCAL_NAME = "fru.png"
 
+# Videos are stored locally as video_<n><suffix>. The suffix is taken from the
+# server's own object key so the slideshow's extension-based video detection
+# still recognises the file; anything it wouldn't play falls back to .mp4
+# (the content type the upload route defaults to).
+VIDEO_LOCAL_PREFIX = "video_"
+VIDEO_SUFFIXES = (".mov", ".mp4")
+DEFAULT_VIDEO_SUFFIX = ".mp4"
+
 
 def _load_manifest(manifest_path: Path) -> dict:
     """Read the on-disk manifest, or {} if absent/unreadable/corrupt."""
@@ -73,33 +96,34 @@ def _save_manifest(manifest_path: Path, manifest: dict) -> None:
         logger.warning(f"Could not write asset manifest {manifest_path}: {e}")
 
 
-def _fetch_signed_urls(http_client: HTTPClient, endpoint: str, registration_id: str) -> list[str]:
-    """GET one signed_urls list. Returns [] on any failure.
+def _get_json(http_client: HTTPClient, url: str, params: dict | None = None) -> dict:
+    """Single-attempt GET of a JSON object. Returns {} on any failure.
 
-    Both the images and the videos endpoint are expected to return the same
-    `{"signed_urls": [...]}` shape. The videos endpoint does not exist
-    server-side yet, so failing quietly here is the normal path for videos.
+    Deliberately not http_client.get(): that retries, and these listings run
+    on the recognition thread where a definitive 404 must not cost
+    max_retries × timeout of stalled recognition.
     """
-    if not endpoint:
-        return []
     try:
-        data = http_client.get(endpoint, params={"registration_id": registration_id})
-    except Exception as e:
-        logger.info(f"No assets from {endpoint} for {registration_id}: {e}")
-        return []
-    urls = data.get("signed_urls", []) if isinstance(data, dict) else []
-    return [u for u in urls if isinstance(u, str)]
+        data = http_client.get_json_once(url, params=params)
+    except Exception as e:  # a broken/legacy client must not take the loop down
+        logger.info(f"Asset listing failed at {url}: {e}")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _str_or_none(value) -> str | None:
+    """A non-empty string, or None — JSON fields here are all nullable."""
+    return value if isinstance(value, str) and value else None
 
 
 def _match_url(urls: list[str], filename: str) -> str | None:
     """Find the URL whose path ends with `filename`.
 
-    Safe because the server returns raw object URLs
-    (`http://<endpoint>/<registration_id>/wpu/<filename>`) rather than
-    opaque signed keys, so the original filename survives in the path. If
-    the backend ever switches to hashed keys this is the assumption that
-    breaks, and the server would need to return a {filename: url} mapping
-    instead of a flat list.
+    Fallback for the older unlabelled `signed_urls` list. Safe for cutouts
+    because the server writes those to fixed named keys
+    (`<registration_id>/wpu/<filename>`) and returns raw object URLs, so the
+    filename survives in the path. It is NOT usable for videos, whose keys
+    are generated UUIDs — see `_fetch_video_urls`.
     """
     if not filename:
         return None
@@ -107,6 +131,76 @@ def _match_url(urls: list[str], filename: str) -> str | None:
         if urlparse(url).path.endswith(filename):
             return url
     return None
+
+
+def _fetch_cutout_urls(
+    http_client: HTTPClient,
+    endpoint: str,
+    registration_id: str,
+    sau_filename: str,
+    fru_filename: str,
+) -> dict:
+    """Resolve this person's SAU/FRU cutout URLs. Returns {"sau": …, "fru": …}.
+
+    Prefers the server's explicit labels over guessing from the flat list:
+    they are unambiguous, and a registration with only one of the two cutouts
+    yields a one-entry `signed_urls` that position alone can't disambiguate.
+    """
+    urls: dict = {"sau": None, "fru": None}
+    if not endpoint:
+        return urls
+
+    data = _get_json(http_client, endpoint, params={"registration_id": registration_id})
+    if not data:
+        return urls
+
+    urls["sau"] = _str_or_none(data.get("sau_signed_url"))
+    urls["fru"] = _str_or_none(data.get("fru_signed_url"))
+    if urls["sau"] and urls["fru"]:
+        return urls
+
+    listed = [u for u in (data.get("signed_urls") or []) if isinstance(u, str)]
+    urls["sau"] = urls["sau"] or _match_url(listed, sau_filename)
+    urls["fru"] = urls["fru"] or _match_url(listed, fru_filename)
+    return urls
+
+
+def _fetch_video_urls(
+    http_client: HTTPClient, endpoint: str, registration_id: str, limit: int
+) -> list[str]:
+    """Resolve this person's SAU video URLs, in capture order.
+
+    `endpoint` is the *base* — the registration id goes in the PATH
+    (`/api/v1/sau/media/<id>`), not a query string. The response carries
+    `video_urls` (all captured videos, index 0 = the composited clip) plus
+    `video_url`, the pre-multi-video scalar kept for older clients; the
+    scalar is only read when the list is absent, so a server predating the
+    list still works.
+
+    Only the first `limit` are taken. Videos are picked BY POSITION because
+    the server's object keys are generated UUIDs with no trace of the
+    original filename.
+    """
+    if not endpoint or limit <= 0:
+        return []
+
+    data = _get_json(http_client, f"{endpoint.rstrip('/')}/{registration_id}")
+    if not data:
+        return []
+
+    listed = [u for u in (data.get("video_urls") or []) if _str_or_none(u)]
+    if not listed:
+        single = _str_or_none(data.get("video_url"))
+        listed = [single] if single else []
+    return listed[:limit]
+
+
+def _video_local_name(index: int, url: str) -> str:
+    """Local filename for the nth video, keeping the server's extension."""
+    suffix = os.path.splitext(urlparse(url).path)[1].lower()
+    if suffix not in VIDEO_SUFFIXES:
+        suffix = DEFAULT_VIDEO_SUFFIX
+    return f"{VIDEO_LOCAL_PREFIX}{index}{suffix}"
 
 
 def _validators(headers: dict | None) -> dict:
@@ -155,14 +249,17 @@ def _is_still_fresh(http_client: HTTPClient, url: str, record: dict) -> bool:
 
 def _fetch_one(
     http_client: HTTPClient,
-    urls: list[str],
-    server_filename: str,
+    url: str | None,
     local_name: str,
     raw_dir: Path,
     manifest: dict,
     key: str,
 ) -> tuple[Path | None, bool]:
-    """Resolve one asset to a local file.
+    """Download one already-resolved asset URL to a local file.
+
+    The caller resolves the URL — by label for cutouts, by position for
+    videos — so this stays a pure fetch-and-cache step with one policy for
+    both. `url=None` means the server didn't offer this asset.
 
     Returns (local_path_or_None, changed) where `changed` is True only when
     fresh bytes were just written — the signal the caller needs to throw away
@@ -170,7 +267,6 @@ def _fetch_one(
     """
     record = manifest.get(key) or {}
     local_path = raw_dir / local_name
-    url = _match_url(urls, server_filename)
 
     if url is None:
         # Server didn't offer this asset this time. Keep a previously-fetched
@@ -220,20 +316,54 @@ def _fetch_one(
     return local_path, True
 
 
+def _is_video_file(name: str) -> bool:
+    """Whether a filename is one of ours in raw/ or display/."""
+    return name.startswith(VIDEO_LOCAL_PREFIX) and name.lower().endswith(VIDEO_SUFFIXES)
+
+
+def _cached_videos(raw_dir: Path) -> list[Path]:
+    """Previously-fetched videos still on disk, in stable order."""
+    try:
+        return sorted(p for p in raw_dir.iterdir() if p.is_file() and _is_video_file(p.name))
+    except OSError:
+        return []
+
+
+def _prune_videos(raw_dir: Path, keep: set[str], manifest: dict) -> None:
+    """Delete cached videos the server no longer offers under that name."""
+    for stale in _cached_videos(raw_dir):
+        if stale.name in keep:
+            continue
+        try:
+            stale.unlink()
+            logger.info(f"Removed superseded video {stale.name}")
+        except OSError as e:
+            logger.warning(f"Could not remove superseded video {stale}: {e}")
+            continue
+        manifest.pop(os.path.splitext(stale.name)[0], None)
+
+
 def fetch_person_assets(
     http_client: HTTPClient,
     wpu_endpoint: str,
-    wpu_videos_endpoint: str,
+    sau_media_endpoint: str,
     registration_id: str,
     sau_filename: str,
     fru_filename: str,
-    video_filenames: list[str],
+    video_count: int,
     assets_dir: Path,
 ) -> dict:
     """Best-effort fetch of this person's SAU/FRU cutouts + videos.
 
     Downloads into `assets_dir/raw/`, cached via `assets_dir/manifest.json`.
     Never raises — every failure mode degrades to a None/absent entry.
+
+    Args:
+        wpu_endpoint: cutout listing URL, queried with ?registration_id=…
+        sau_media_endpoint: BASE of the SAU media route; the registration id
+            is appended as a path segment.
+        video_count: how many of the returned videos to keep, from the front.
+            1 takes just the composited clip.
 
     Returns:
         {
@@ -249,39 +379,46 @@ def fetch_person_assets(
         manifest_path = assets_dir / MANIFEST_NAME
         manifest = _load_manifest(manifest_path)
 
-        image_urls = _fetch_signed_urls(http_client, wpu_endpoint, registration_id)
-        # Only worth asking for videos if any are configured.
-        video_urls = (
-            _fetch_signed_urls(http_client, wpu_videos_endpoint, registration_id)
-            if video_filenames
-            else []
+        cutout_urls = _fetch_cutout_urls(
+            http_client, wpu_endpoint, registration_id, sau_filename, fru_filename
+        )
+        video_urls = _fetch_video_urls(
+            http_client, sau_media_endpoint, registration_id, video_count
         )
 
-        for key, server_filename, local_name in (
-            ("sau", sau_filename, SAU_LOCAL_NAME),
-            ("fru", fru_filename, FRU_LOCAL_NAME),
-        ):
+        for key, local_name in (("sau", SAU_LOCAL_NAME), ("fru", FRU_LOCAL_NAME)):
             path, changed = _fetch_one(
-                http_client, image_urls, server_filename, local_name,
-                raw_dir, manifest, key,
+                http_client, cutout_urls[key], local_name, raw_dir, manifest, key,
             )
             result[key] = path
             if changed:
                 result["changed"].add(key)
 
-        for index, server_filename in enumerate(video_filenames, start=1):
-            key = f"video_{index}"
-            # Keep the server's own extension so the slideshow's
-            # extension-based video detection still recognises the file.
-            suffix = os.path.splitext(server_filename)[1] or ".mov"
+        keep_video_names = set()
+        for index, url in enumerate(video_urls, start=1):
+            key = f"{VIDEO_LOCAL_PREFIX}{index}"
+            local_name = _video_local_name(index, url)
+            keep_video_names.add(local_name)
             path, changed = _fetch_one(
-                http_client, video_urls, server_filename, f"{key}{suffix}",
-                raw_dir, manifest, key,
+                http_client, url, local_name, raw_dir, manifest, key,
             )
             if path is not None:
                 result["videos"].append(path)
             if changed:
                 result["changed"].add(key)
+
+        if video_urls or video_count <= 0:
+            # A re-upload can change a video's extension, and video_count can
+            # be lowered (to 0, disabling videos entirely) — either way the
+            # superseded file would otherwise linger in raw/ forever, charged
+            # against the disk budget.
+            _prune_videos(raw_dir, keep_video_names, manifest)
+        else:
+            # Videos are wanted but the listing came back empty, which an
+            # unreachable endpoint and a genuinely video-less registration
+            # produce alike. Reuse whatever is already cached rather than let
+            # a network blip cost a visitor the video they had last time.
+            result["videos"] = _cached_videos(raw_dir)
 
         _save_manifest(manifest_path, manifest)
     except Exception as e:
@@ -305,7 +442,21 @@ def link_videos_into(videos: list[Path], display_dir: Path) -> int:
     together without storing every video twice. Falls back to a real copy
     when the link can't be made (cross-device, or a filesystem without
     hardlinks). Returns how many videos ended up in display/.
+
+    Videos the caller no longer lists are removed from display/ first, so a
+    re-uploaded or dropped clip stops appearing in the slideshow without
+    having to discard the composed slides alongside it. Only `video_*` names
+    are touched — composed slides use their own prefixes.
     """
+    keep = {video.name for video in videos}
+    try:
+        for existing in display_dir.iterdir():
+            if existing.is_file() and _is_video_file(existing.name) and existing.name not in keep:
+                existing.unlink()
+                logger.info(f"Removed stale video slide {existing.name}")
+    except OSError:
+        pass
+
     linked = 0
     for video in videos:
         target = display_dir / video.name

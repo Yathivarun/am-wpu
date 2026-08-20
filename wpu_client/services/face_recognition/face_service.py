@@ -953,11 +953,11 @@ class FaceRecognitionService(ServiceBase):
             assets = fetch_person_assets(
                 self._http_client,
                 self.config.wpu_endpoint,
-                getattr(self.config, "wpu_videos_endpoint", ""),
+                getattr(self.config, "sau_media_endpoint", ""),
                 registration_id,
                 getattr(self.config, "sau_cutout_filename", "sau_cutout.png"),
                 getattr(self.config, "fru_cutout_filename", "fru_cutout.png"),
-                list(getattr(self.config, "video_filenames", []) or []),
+                int(getattr(self.config, "video_count", 1) or 0),
                 assets_dir,
             )
 
