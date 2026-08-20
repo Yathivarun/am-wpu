@@ -30,6 +30,36 @@ logger = logging.getLogger(__name__)
 # can't rely on `ended` firing in a timely way — see _on_video_duration_known().
 VIDEO_DISPLAY_SECONDS = 10
 
+# --- SCALE_MODE: production 6:7 panel vs an ordinary test monitor ---------
+# `slideshow.scale_mode` picks how a slide is mapped into the window, and it
+# is the ONLY thing that decides on-screen shape. Applied identically to
+# images and videos (SlideshowWindow._content_fit).
+#
+# The production display advertises a 1920x1080 framebuffer but is physically
+# a 6:7 panel, so the hardware squeezes everything horizontally. `fill`
+# non-uniformly stretches each slide to the window box, and that stretch is
+# exactly what the panel's squeeze cancels out — hence `fill` is the default
+# and reproduces the shipped behaviour bit for bit. On an ordinary 16:9
+# monitor nothing cancels it, which is why every slide looks stretched there;
+# `fit` letterboxes instead and is the setting for test hardware.
+#
+# Two things deliberately removed from the old path, both no-ops for shape:
+#
+#  * A `pixbuf.scale_simple(1920, 1080)` pre-stretch before FILL. FILL already
+#    maps any paintable onto the window box regardless of its intrinsic size,
+#    so pre-stretching changed nothing on screen — it only cost a full CPU
+#    resample of every slide and one extra generation of resampling loss. The
+#    old code said as much itself in _load_video's docstring.
+#  * A `portrait -> CONTAIN` override that ignored scale_mode for any
+#    taller-than-wide image. Under `fill` that would letterbox exactly the
+#    slides the 6:7 panel most needs stretched; under `fit` it was redundant,
+#    since CONTAIN letterboxes portrait content anyway.
+_SCALE_MODE_FITS = {
+    "fill": Gtk.ContentFit.FILL,
+    "fit": Gtk.ContentFit.CONTAIN,
+    "crop": Gtk.ContentFit.COVER,
+}
+
 # --- Why video was rendering blank ---------------------------------------
 # The previous implementation played video via Gtk.MediaFile, which (on the
 # GStreamer backend) paints frames onto its Gdk.Paintable using the
@@ -428,8 +458,9 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         self.picture.set_vexpand(True)
         self.picture.set_hexpand(True)
 
-        # Set default to FILL for anamorphic stretching
-        self.picture.set_content_fit(Gtk.ContentFit.FILL)
+        # Per config.scale_mode — see the SCALE_MODE note at the top of this
+        # module. Set here too so the very first frame is already correct.
+        self.picture.set_content_fit(self._content_fit())
 
         # Create overlay label for face recognition results
         self.overlay_label = Gtk.Label()
@@ -543,26 +574,23 @@ class SlideshowWindow(Gtk.ApplicationWindow):
 
         logger.info(f"Updated image list: {len(new_images)} images, mode={mode}")
 
-    def _get_content_fit_for_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf) -> Gtk.ContentFit:
-        """
-        Original logic kept intact but bypassed in load_image to support anamorphic scaling.
-        """
-        width = pixbuf.get_width()
-        height = pixbuf.get_height()
-        is_portrait = height > width
+    def _content_fit(self) -> Gtk.ContentFit:
+        """How a slide is mapped into the window, from `slideshow.scale_mode`.
 
-        if is_portrait:
-            return Gtk.ContentFit.CONTAIN
+        One rule for images and videos alike, with no per-image exceptions —
+        see the SCALE_MODE note at the top of this module for why the old
+        portrait special-case had to go.
 
-        scale_mode = self.config.scale_mode
-        if scale_mode == "fill":
-            return Gtk.ContentFit.FILL
-        elif scale_mode == "fit":
-            return Gtk.ContentFit.CONTAIN
-        elif scale_mode == "crop":
-            return Gtk.ContentFit.COVER
-        else:
-            return Gtk.ContentFit.FILL
+            fill  non-uniform stretch to the window box, aspect ignored.
+                  The production 6:7 panel's setting: it advertises a 1920x1080
+                  framebuffer and squeezes it into a 6:7 physical panel, and
+                  pre-stretching here cancels that squeeze out.
+            fit   letterbox, aspect preserved. Use on an ordinary monitor,
+                  where FILL's stretch has nothing cancelling it and every
+                  slide looks distorted.
+            crop  fill the window and crop the overflow, aspect preserved.
+        """
+        return _SCALE_MODE_FITS.get(self.config.scale_mode, Gtk.ContentFit.FILL)
 
     def _is_video_path(self, path: str) -> bool:
         """Whether `path` (local file or URL) is a video slide, per
@@ -639,25 +667,19 @@ class SlideshowWindow(Gtk.ApplicationWindow):
             # Load from local file into a pixbuf so we can inspect dimensions
             pixbuf = GdkPixbuf.Pixbuf.new_from_file(image_path)
 
-        # =================================================================
-        # ANAMORPHIC DISTORTION SCRIPT
-        # 1. Forcefully stretch the loaded pixbuf to 1920x1080 natively in GTK.
-        #    This ignores aspect ratio and pre-distorts the 6:7 image so the 
-        #    hardware display squishing it cancels it out perfectly.
-        # =================================================================
-        pixbuf = pixbuf.scale_simple(1920, 1080, GdkPixbuf.InterpType.BILINEAR)
-
-        # 2. Force FILL so GTK maps our newly stretched 1920x1080 image perfectly
-        #    1:1 to the 1080p window without adding any internal letterboxing.
-        self.picture.set_content_fit(Gtk.ContentFit.FILL)
-        # =================================================================
+        # The pixbuf is handed to GTK at its native size; scale_mode alone
+        # decides the on-screen shape. See the SCALE_MODE note at the top of
+        # this module, including why the old 1920x1080 pre-stretch was a
+        # no-op for shape and has been dropped.
+        fit = self._content_fit()
+        self.picture.set_content_fit(fit)
 
         texture = Gdk.Texture.new_for_pixbuf(pixbuf)
         self.picture.set_paintable(texture)
 
         orientation = "portrait" if pixbuf.get_height() > pixbuf.get_width() else "landscape"
         logger.debug(
-            f"Displaying ({orientation}, anamorphic stretch applied): "
+            f"Displaying ({orientation}, scale_mode={self.config.scale_mode}): "
             f"{os.path.basename(image_path) if not image_path.startswith('http') else 'visitor image'}"
         )
 
@@ -669,18 +691,12 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         _GstVideoPlayer pushes Gdk.MemoryTexture frames onto the SAME
         self.picture widget used for images — no separate video widget.
 
-        Anamorphic note: content_fit stays FILL, same as images. FILL always
-        non-uniformly stretches whatever paintable it's given to exactly fill
-        the widget's own box, ignoring the paintable's intrinsic aspect ratio
-        — that's the same distortion the image path gets from its explicit
-        pixbuf.scale_simple(1920, 1080, ...) pre-stretch (composing that
-        pre-stretch with a further FILL-to-window-box stretch is mathematically
-        identical to a single FILL-to-window-box stretch of the original
-        image; the intermediate 1920x1080 step doesn't change the final
-        on-screen shape). So video gets the same correction "for free" via
-        FILL — each frame is a plain Gdk.MemoryTexture at the video's native
-        resolution, and FILL stretches it into the window box exactly like it
-        does for the pre-stretched image texture.
+        Geometry note: video uses the same config-driven content fit as
+        images (_content_fit / the SCALE_MODE note at the top of this module),
+        so a slideshow mixing the two keeps one consistent shape. Nothing
+        video-specific is needed — each frame arrives as a plain
+        Gdk.MemoryTexture at the video's native resolution, and content_fit
+        maps it into the window box exactly as it does an image texture.
 
         Advance-on-completion: video plays to EOS and advances via
         _on_video_ended(), driven by the pipeline bus's EOS message — NOT a
@@ -698,8 +714,9 @@ class SlideshowWindow(Gtk.ApplicationWindow):
             local_path = video_path
             temp_path = None
 
-        # Same FILL behaviour as images, for a consistent look (see docstring).
-        self.picture.set_content_fit(Gtk.ContentFit.FILL)
+        # Same content fit as images, so a mixed image/video slideshow keeps
+        # one consistent geometry (see docstring).
+        self.picture.set_content_fit(self._content_fit())
 
         self._current_media_temp_path = temp_path
         self._video_advanced = False

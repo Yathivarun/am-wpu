@@ -27,7 +27,15 @@ services:
       - "*.mov"
       - "*.mp4"
     background_color: "black"
-    scale_mode: "fill"  # fill, fit, crop
+    # How each slide is mapped into the window — the ONLY setting that
+    # decides on-screen shape, applied to images and videos alike.
+    #   fill  stretch to the window, aspect ignored.  PRODUCTION 6:7 PANEL:
+    #         it advertises a 1920x1080 framebuffer and squeezes it into a 6:7
+    #         physical panel, and this stretch is what cancels that squeeze.
+    #   fit   letterbox, aspect preserved.  USE ON AN ORDINARY MONITOR — there
+    #         is no panel squeeze to cancel, so "fill" looks stretched.
+    #   crop  fill the window and crop the overflow, aspect preserved.
+    scale_mode: "fill"
     sort_mode: "alphabetical"  # numeric, alphabetical
 
   face_recognition:
