@@ -33,28 +33,39 @@ sudo apt-get install -y \
 echo "[2/8] Python venv"
 [ -d .venv ] || python3 -m venv --system-site-packages .venv   # system-site for picamera2/gi
 ./.venv/bin/python -m pip install --upgrade pip
-# Prefer uv if present; else pip.
-if command -v uv >/dev/null; then uv sync; else ./.venv/bin/pip install -e .; fi
+# Prefer uv if present; else pip. --frozen installs exactly what uv.lock pins;
+# without it uv is free to re-resolve and has pulled NumPy 2.x back in, which
+# breaks picamera2's C ABI on first import.
+# UV_HTTP_TIMEOUT: the opencv wheel is ~42 MB and uv's 30s default expires
+# mid-download on a slow link, failing the whole sync after 3 retries.
+if command -v uv >/dev/null; then
+  UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-900}" uv sync --frozen
+else
+  ./.venv/bin/pip install -e .
+fi
 
 echo "[3/8] Directories"
 mkdir -p data/embeddings data/people data/stock_images models config
 sudo mkdir -p /var/log/wpu-client && sudo chown "$RUN_USER" /var/log/wpu-client
 
 echo "[4/8] Models (bundled in release — verify present)"
-for m in models/face_recognition_sface_2021dec.onnx \
-         models/face_detection_yunet_2023mar.onnx; do
+# All three are required. mobilefacenet.onnx is the production recogniser — a
+# missing one is not a degraded install, it aborts the recognition thread at
+# startup and the kiosk silently shows stock images forever.
+for m in models/mobilefacenet.onnx \
+         models/face_detection_yunet_2023mar.onnx \
+         models/face_recognition_sface_2021dec.onnx; do
   [ -f "$m" ] || { echo "MISSING $m — release zip incomplete"; exit 1; }
 done
-# mobilefacenet is research-only (config model: "mobilenet"); production runs
-# sface, so its absence is not a provisioning failure.
-[ -f models/mobilefacenet.onnx ] || echo "      note: models/mobilefacenet.onnx absent — research model unavailable"
 
 echo "[5/8] Config"
 # config/config.yaml is per-device and deliberately untracked/unshipped, so this
 # always seeds from the example on a fresh unit and never clobbers a tuned one.
 [ -f config/config.yaml ] || cp config/config.yaml.example config/config.yaml
-echo "      endpoints in config/config.yaml — point them at the master server before first run:"
-grep -E "^\s*(api_endpoint|wpu_endpoint|model):" config/config.yaml | sed 's/^/        /'
+echo "      settings in config/config.yaml — check these before first run:"
+echo "        (endpoints must point at the master server; scale_mode must match the panel)"
+grep -E "^\s*(api_endpoint|wpu_endpoint|sau_media_endpoint|model|scale_mode):" config/config.yaml \
+  | sed 's/^/        /'
 
 echo "[6/8] Install systemd units (paths/user/session substituted for this device)"
 # The units in systemd/ are templates — the app may be unpacked anywhere and run

@@ -42,10 +42,16 @@ services:
     enabled: true
     camera_id: 0
     n: 4
-    # Recognition model: "sface" (OpenCV 128-D, light, default) or "mobilenet"
-    # (distilled MobileFaceNet 512-D → server's auraface gallery). v1: both are
-    # kept and this is a one-line switch while accuracy is still being tested.
-    model: "sface"
+    # Recognition model. This picks BOTH the on-device embedder and the server
+    # gallery the identify request queries, and the two galleries are disjoint
+    # vector spaces — setting this wrong doesn't lower accuracy, it matches
+    # nobody at all.
+    #   mobilenet  MobileFaceNet 512-D → server's `auraface` gallery. Use this.
+    #              It is where registrations are actually enrolled.
+    #   sface      OpenCV SFace 128-D → server's `sface` gallery, which is
+    #              empty on the live cluster. Lighter on CPU; useful only for
+    #              the offline diagnostic gallery below.
+    model: "mobilenet"
     # Point these at your registration server. Live cluster host = 192.168.1.19,
     # API on :8000 — change the host in all three together.
     api_endpoint: "http://192.168.1.19:8000/api/v1/identify/"

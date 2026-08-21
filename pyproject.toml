@@ -28,6 +28,11 @@ dependencies = [
     # ships built against NumPy 2.x, and re-test on-device.
     "opencv-python==4.11.0.86",
     "numpy==1.26.4",
+    # Runs the production recogniser: models/mobilefacenet.onnx (512-D), whose
+    # vectors are what the registration server's `auraface` gallery holds. NOT
+    # optional — face_service aborts the whole recognition thread if the import
+    # fails, so an install without it leaves the kiosk showing stock images only.
+    "onnxruntime>=1.26.0",
     "httpx",
     "pydantic",
     "setuptools==80.10.2",
@@ -36,13 +41,12 @@ dependencies = [
     "psutil",
 ]
 
-# Only the `mobilenet` recognition model needs onnxruntime, and that model is
-# research-only — production runs `sface`, which uses OpenCV's built-in
-# cv2.FaceRecognizerSF. Both import sites are lazy (sface_embedder.py,
-# face_service.py), so a production install never touches it.
-#   research use:  pip install -e '.[research]'
 [project.optional-dependencies]
-research = ["onnxruntime>=1.26.0"]
+# Deprecated, kept empty so existing `uv sync --extra research` invocations on
+# provisioned devices keep working. It used to carry onnxruntime, back when
+# `mobilenet` was treated as a research model; that model is now the production
+# recogniser and onnxruntime is a base dependency above. Nothing needs this.
+research = []
 
 # Lint/test tooling. Deliberately excludes picamera2/pygobject's system
 # counterparts — CI installs this group only (no hardware/GTK stack), so

@@ -106,6 +106,11 @@ _ARCFACE_REF_LANDMARKS = np.array(
 # config `model` value → server gallery id sent in the identify request.
 _SERVER_MODEL_ID = {"sface": "sface", "mobilenet": "auraface"}
 
+# Used when `model` is absent or unrecognised. Must stay the gallery the server
+# actually enrols into, or an unnoticed typo in config.yaml silently downgrades
+# a device to querying an empty collection and it recognises nobody.
+DEFAULT_MODEL = "mobilenet"
+
 # Maximum number of faces processed per captured frame (largest-first). Caps
 # per-frame CPU cost when a crowd is in view; raise/lower freely.
 MAX_FACES_PER_FRAME = 2
@@ -163,12 +168,17 @@ class FaceRecognitionService(ServiceBase):
     frame; only that one method needs editing if a real selection
     requirement (round-robin, random, closest-face, ...) is defined later.
 
-    Embeddings are generated locally on the Pi using YuNet (detection) +
-    SFace-128D (recognition, OpenCV). The pipeline mirrors the registration
-    server's SFaceBackend exactly (alignCrop + feature + L2-normalise) so the
-    128-D probe vectors are directly comparable to the gallery vectors stored
-    in the `face_vectors_sface` Qdrant collection. The embedding is sent to the
-    server API only for identity lookup; recognition itself happens on the Pi.
+    Embeddings are generated locally on the Pi: YuNet detects and locates the
+    face, then the configured embedder turns it into a vector. Each embedder
+    mirrors its server-side counterpart exactly, so the probe vectors are
+    directly comparable to the stored gallery vectors:
+
+      mobilenet (default) → ArcFace 5-point align → 112x112 → (x-127.5)/128 →
+                            MobileFaceNet → L2 → `face_vectors_auraface`
+      sface               → alignCrop + feature + L2 → `face_vectors_sface`
+
+    Only the embedding is sent to the server, and only for identity lookup;
+    detection and embedding both happen on-device.
 
     Each visible face is first checked against the cached vectors of every
     currently-tracked person (cheap, local cosine match); only faces that
@@ -249,15 +259,19 @@ class FaceRecognitionService(ServiceBase):
             )
             logger.info(f"Debug frames will be saved to {DEBUG_FRAME_DIR}")
 
-        # Recognition model selection (config.yaml: "sface" | "mobilenet").
-        # "sface"     → OpenCV SFace 128-D (light, default).
-        # "mobilenet" → distilled MobileFaceNet 512-D (matches server auraface).
-        self._model_name: str = str(getattr(config, "model", "sface")).lower()
+        # Recognition model selection (config.yaml: "mobilenet" | "sface").
+        # "mobilenet" → distilled MobileFaceNet 512-D → server's `auraface`
+        #               gallery. The default, and the only gallery the live
+        #               cluster actually enrols registrations into.
+        # "sface"     → OpenCV SFace 128-D → server's `sface` gallery. Lighter,
+        #               but that gallery is empty upstream; diagnostic use only.
+        self._model_name: str = str(getattr(config, "model", DEFAULT_MODEL)).lower()
         if self._model_name not in _SERVER_MODEL_ID:
             logger.warning(
-                f"Unknown recognition model '{self._model_name}' — falling back to 'sface'"
+                f"Unknown recognition model '{self._model_name}' — "
+                f"falling back to '{DEFAULT_MODEL}'"
             )
-            self._model_name = "sface"
+            self._model_name = DEFAULT_MODEL
         self._server_model_id: str = _SERVER_MODEL_ID[self._model_name]
 
         # Models (initialised in start())

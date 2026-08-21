@@ -1237,6 +1237,7 @@ source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "numpy" },
+    { name = "onnxruntime" },
     { name = "opencv-python" },
     { name = "picamera2" },
     { name = "psutil" },
@@ -1253,15 +1254,12 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
-research = [
-    { name = "onnxruntime" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "httpx" },
     { name = "numpy", specifier = "==1.26.4" },
-    { name = "onnxruntime", marker = "extra == 'research'", specifier = ">=1.26.0" },
+    { name = "onnxruntime", specifier = ">=1.26.0" },
     { name = "opencv-python", specifier = "==4.11.0.86" },
     { name = "picamera2" },
     { name = "psutil" },

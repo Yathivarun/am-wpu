@@ -16,7 +16,7 @@ def test_load_missing_file_falls_back_to_defaults_and_writes_one(tmp_path):
 
     assert settings.log_level == "INFO"
     assert settings.services.slideshow.enabled is True
-    assert settings.services.face_recognition.model == "sface"
+    assert settings.services.face_recognition.model == "mobilenet"
     # create_default_config runs as a side effect of a missing file.
     assert config_path.exists()
 
@@ -62,7 +62,22 @@ def test_create_default_config_is_valid_yaml(tmp_path):
     Settings.create_default_config(config_path)
 
     data = yaml.safe_load(config_path.read_text())
-    assert data["services"]["face_recognition"]["model"] == "sface"
+    assert data["services"]["face_recognition"]["model"] == "mobilenet"
+
+
+def test_create_default_config_round_trips_to_the_schema_defaults(tmp_path):
+    """The generated file must BE the defaults, not a hand-kept copy of them.
+
+    The literal this replaced had drifted to `sface` + localhost endpoints
+    while the schema defaults said mobilenet + the live cluster, so a device
+    that generated its own config came up unable to match anyone.
+    """
+    config_path = tmp_path / "config.yaml"
+    Settings.create_default_config(config_path)
+
+    written = Settings(**yaml.safe_load(config_path.read_text()))
+
+    assert written.model_dump() == Settings().model_dump()
 
 
 def test_get_service_config_returns_matching_section(tmp_path):
@@ -147,3 +162,6 @@ def test_example_config_matches_the_settings_schema():
     face = settings.services.face_recognition
     assert face.sau_cutout_filename == "sau_cutout.png"
     assert face.use_legacy_final_images is False
+    # The template provisions every new device (setup.sh step [5/8]), so it has
+    # to name the gallery registrations are actually enrolled into.
+    assert face.model == "mobilenet"

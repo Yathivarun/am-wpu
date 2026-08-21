@@ -33,10 +33,16 @@ class FaceRecognitionConfig(BaseModel):
     enabled: bool = True
     camera_id: int = 0
     n: int = 3
-    # Recognition model: "sface" (OpenCV 128-D, light, default) or "mobilenet"
-    # (distilled MobileFaceNet 512-D → server's auraface gallery). Selects both
-    # the on-device embedder and the gallery the identify request queries.
-    model: str = "sface"
+    # Recognition model — selects both the on-device embedder and the server
+    # gallery the identify request queries. These are two disjoint vector
+    # spaces, so a mismatch here doesn't degrade accuracy, it returns nothing.
+    #   "mobilenet"  MobileFaceNet 512-D → server's `auraface` gallery. DEFAULT,
+    #                and the only one registrations are actually enrolled into.
+    #   "sface"      OpenCV SFace 128-D → server's `sface` gallery. Lighter on
+    #                CPU, but that gallery is empty on the live cluster, so this
+    #                matches nobody. Kept for the local diagnostic gallery and
+    #                for re-testing if enrolment ever moves back to 128-D.
+    model: str = "mobilenet"
     # Live cluster host. Every endpoint below points at the same server; only
     # the host needs changing for a different deployment.
     api_endpoint: str = "http://192.168.1.19:8000/api/v1/identify/"
@@ -141,37 +147,22 @@ class Settings(BaseModel):
 
     @classmethod
     def create_default_config(cls, path: Path) -> None:
-        """Create a default configuration file."""
-        default_config = {
-            "log_level": "INFO",
-            "services": {
-                "slideshow": {
-                    "enabled": True,
-                    "full_screen": True,
-                    "advance_time": 3,
-                    "image_directory": "data/stock_images",
-                    "background_color": "black",
-                    "scale_mode": "fill",
-                    "sort_mode": "alphabetical",
-                },
-                "face_recognition": {
-                    "enabled": True,
-                    "camera_id": 0,
-                    "n": 4,
-                    "model": "sface",
-                    "api_endpoint": "http://localhost:8000/api/v1/identify/",
-                    "wpu_endpoint": "http://localhost:8000/api/v1/wpu/images",
-                    "detection_interval": 5,
-                    "min_face_size": 100,
-                    "display_result": True,
-                    "overlay_hide_delay": 3,
-                    "person_timeout": 10,
-                },
-            },
-        }
+        """Write a config file containing this schema's defaults, verbatim.
 
+        Dumped from the models rather than a hand-written literal. The literal
+        that used to live here silently drifted: it still said `model: sface`
+        and pointed both endpoints at localhost long after the defaults moved
+        to mobilenet and the live cluster, so any device that auto-generated
+        its config came up querying an empty gallery on the wrong host.
+
+        This is the fallback for a device with no config at all. The documented
+        starting point is config/config.yaml.example, which carries the same
+        values plus the comments explaining them.
+        """
         with open(path, "w") as f:
-            yaml.dump(default_config, f, default_flow_style=False, sort_keys=False)
+            f.write("# Auto-generated from the built-in defaults.\n")
+            f.write("# See config/config.yaml.example for the commented template.\n")
+            yaml.dump(cls().model_dump(), f, default_flow_style=False, sort_keys=False)
 
         print(f"Created default config at {path}")
 

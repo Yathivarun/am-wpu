@@ -10,16 +10,21 @@ class IdentifyRequest(BaseModel):
     type: str = Field(description="Type of identification (e.g., 'face')")
     n: int = Field(description="Number of results to return")
     model: str = Field(
-        default="sface",
-        description="Recognition model gallery to query (sface=128D, auraface=512D). "
-        "Required to disambiguate which 128D gallery a probe vector belongs to, "
-        "since more than one 128D embedding space exists server-side.",
+        default="auraface",
+        description="Recognition model gallery to query (auraface=512D, sface=128D). "
+        "Required to disambiguate which gallery a probe vector belongs to, since "
+        "more than one embedding space exists server-side. Defaults to auraface, "
+        "the gallery registrations are enrolled into; callers should still pass it "
+        "explicitly (face_service maps the configured model name via _SERVER_MODEL_ID).",
     )
-    face_vector: str = Field(description="Comma-separated face vector string (128 floats for SFace)")
+    face_vector: str = Field(
+        description="Comma-separated face vector string (512 floats for MobileFaceNet, "
+        "128 for SFace). Length must match the gallery named in `model`."
+    )
 
     @classmethod
     def from_vector_list(
-        cls, type: str, n: int, face_vector: list[float], model: str = "sface"
+        cls, type: str, n: int, face_vector: list[float], model: str = "auraface"
     ) -> "IdentifyRequest":
         """
         Create request from a list of floats.
@@ -28,7 +33,7 @@ class IdentifyRequest(BaseModel):
             type: Identification type
             n: Number of results
             face_vector: List of float values
-            model: Recognition model gallery to query (default "sface")
+            model: Recognition model gallery to query (default "auraface")
 
         Returns:
             IdentifyRequest instance with comma-separated string
