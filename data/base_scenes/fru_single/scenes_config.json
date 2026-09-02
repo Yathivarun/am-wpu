@@ -2,9 +2,9 @@
   "1": {
     "gender": ["male"],
     "face_anchor": {
-      "target_eye_midpoint": [878, 1205],
-      "target_eye_distance": 34,
-      "target_tilt_angle": 0
+      "target_eye_midpoint": [882, 610],
+      "target_eye_distance": 66,
+      "target_tilt_angle": -2
     }
   },
   "2": {
@@ -18,8 +18,8 @@
   "3": {
     "gender": ["male"],
     "face_anchor": {
-      "target_eye_midpoint": [919, 936],
-      "target_eye_distance": 35,
+      "target_eye_midpoint": [898, 669],
+      "target_eye_distance": 80,
       "target_tilt_angle": 0
     }
   },
@@ -61,6 +61,15 @@
       "target_eye_midpoint": [890, 595],
       "target_eye_distance": 51,
       "target_tilt_angle": 0
+    }
+  },
+
+  "9": {
+    "gender": ["female"],
+    "face_anchor": {
+      "target_eye_midpoint": [939, 395],
+      "target_eye_distance": 81,
+      "target_tilt_angle": 3
     }
   }
 }
