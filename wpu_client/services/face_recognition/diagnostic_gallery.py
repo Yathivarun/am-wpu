@@ -126,6 +126,10 @@ class DiagnosticGallery:
     def __len__(self) -> int:
         return len(self._entries)
 
+    def entries(self) -> list[GalleryEntry]:
+        """Every loaded person, in gallery order."""
+        return list(self._entries)
+
     def get_entry(self, slug: str) -> Optional[GalleryEntry]:
         """Look up a loaded entry by its slug (registration_id), or None."""
         for entry in self._entries:
