@@ -19,6 +19,8 @@ its own separate slides.
 
 ## Directories
 
+Every entry also carries a generated `name` — see the field reference below.
+
 | Directory | Composes | Config shape |
 |---|---|---|
 | `sau_single/` | one body | `{"<id>": {"scale": f, "anchor": [x, y]}}` |
@@ -45,10 +47,30 @@ back to the server's pre-composed images, and nothing breaks.
 
 ## Field reference
 
+### `name`
+
+A readable label for the entry, derived from its background's filename
+(`winter_market.png` -> `"Winter Market"`). It has no effect on composition —
+scenes are matched by id — but it is what log lines quote when a slide is
+written, and what makes a config readable without cross-referencing the
+directory listing.
+
+**Do not hand-edit it.** It is generated, and it drifts the moment a background
+is renamed. Regenerate after adding, removing or renaming any background:
+
+```bash
+python scripts/sync_scene_names.py            # rewrite the configs
+python scripts/sync_scene_names.py --check    # report drift, change nothing
+```
+
+The test suite runs `--check`, so a config that drifts fails CI. Today's
+backgrounds are numbered (`4.png`), so their names read as `"4"`; the field
+starts earning its keep once scenes are named for what they show.
+
 ### Body (`scale` / `anchor`)
 
 ```jsonc
-"1": { "scale": 0.3922, "anchor": [936, 2539] }
+"1": { "name": "1", "scale": 0.3922, "anchor": [936, 2539] }
 ```
 
 - `scale` — multiplier applied to the cutout before pasting.
@@ -67,6 +89,7 @@ A duo scene is only written when **both** people can be placed.
 
 ```jsonc
 "2": {
+  "name": "2",
   "gender": ["male"],
   "face_anchor": {
     "target_eye_midpoint": [946, 538],

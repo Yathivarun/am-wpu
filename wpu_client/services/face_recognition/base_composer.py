@@ -166,13 +166,35 @@ def _load_scenes_config(scenes_config_path: Path) -> dict:
         return {}
 
 
-def _find_scene_file(scenes_dir: Path, scene_id: str) -> Path | None:
+def find_scene_file(scenes_dir: Path, scene_id: str) -> Path | None:
     """Locate the background image whose stem matches a config key."""
     for ext in _SCENE_EXTENSIONS:
         candidate = scenes_dir / f"{scene_id}{ext}"
         if candidate.exists():
             return candidate
     return None
+
+
+def derive_scene_name(image_path: Path | str) -> str:
+    """A readable scene name from its background's filename.
+
+    The stem, with separators turned into spaces and words capitalised:
+    `winter_market.png` -> "Winter Market". A numeric filename has nothing to
+    humanise and comes back as-is ("4"), which is what the shipped scenes look
+    like today; the value shows up once backgrounds get descriptive names.
+
+    Kept as a pure filename transform so `name` can always be regenerated from
+    what is on disk — see scripts/sync_scene_names.py.
+    """
+    stem = Path(image_path).stem
+    words = [w for w in stem.replace("_", " ").replace("-", " ").split() if w]
+    return " ".join(w.capitalize() if w.isalpha() else w for w in words) or stem
+
+
+def scene_label(scene_id: str, meta: dict) -> str:
+    """How a scene is named in logs: its `name`, falling back to its id."""
+    name = meta.get("name")
+    return f"{scene_id} ({name})" if name and name != scene_id else scene_id
 
 
 def _cache_hit(output_dir: Path, prefix: str) -> bool:
@@ -332,9 +354,9 @@ def compose_single_body(
     if not scenes_config:
         return None
 
-    written = 0
+    written: list[str] = []
     for scene_id, meta in scenes_config.items():
-        scene_file = _find_scene_file(scenes_dir, scene_id)
+        scene_file = find_scene_file(scenes_dir, scene_id)
         if scene_file is None:
             continue
         scene = load_alpha_bgra(scene_file)
@@ -343,12 +365,14 @@ def compose_single_body(
         if not _paste_body(scene, cutout, meta.get("scale", 1.0), meta.get("anchor", (0, 0))):
             continue
         if _write_scene(scene, output_dir, f"{BODY_PREFIX}{scene_id}"):
-            written += 1
+            written.append(scene_label(scene_id, meta))
 
     if not written:
         logger.warning("Base body compose: no scenes produced any output")
         return None
-    logger.info(f"Base body compose: {written} scene(s) written to {output_dir}")
+    logger.info(
+        f"Base body compose: {len(written)} scene(s) -> {output_dir} [{', '.join(written)}]"
+    )
     return str(output_dir)
 
 
@@ -387,14 +411,14 @@ def compose_single_face(
     if not scenes_config:
         return None
 
-    written = 0
+    written: list[str] = []
     for scene_id, meta in scenes_config.items():
         if not _gender_allows(gender, meta):
             continue
         anchor = meta.get("face_anchor")
         if not anchor:
             continue
-        scene_file = _find_scene_file(scenes_dir, scene_id)
+        scene_file = find_scene_file(scenes_dir, scene_id)
         if scene_file is None:
             continue
         scene = load_alpha_bgra(scene_file)
@@ -411,12 +435,14 @@ def compose_single_face(
             logger.warning(f"Base face compose: bad face_anchor for scene {scene_id}: {e}")
             continue
         if _write_scene(scene, output_dir, f"{FACE_PREFIX}{scene_id}"):
-            written += 1
+            written.append(scene_label(scene_id, meta))
 
     if not written:
         logger.warning("Base face compose: no scenes produced any output")
         return None
-    logger.info(f"Base face compose: {written} scene(s) written to {output_dir}")
+    logger.info(
+        f"Base face compose: {len(written)} scene(s) -> {output_dir} [{', '.join(written)}]"
+    )
     return str(output_dir)
 
 
@@ -451,9 +477,9 @@ def compose_duo_body(
     if not scenes_config:
         return None
 
-    written = 0
+    written: list[str] = []
     for scene_id, meta in scenes_config.items():
-        scene_file = _find_scene_file(scenes_dir, scene_id)
+        scene_file = find_scene_file(scenes_dir, scene_id)
         if scene_file is None:
             continue
         scene = load_alpha_bgra(scene_file)
@@ -469,12 +495,15 @@ def compose_duo_body(
             continue
 
         if _write_scene(scene, output_dir, f"{BODY_PREFIX}{scene_id}"):
-            written += 1
+            written.append(scene_label(scene_id, meta))
 
     if not written:
         logger.warning("Base duo body compose: no scenes produced any output")
         return None
-    logger.info(f"Base duo body compose: {written} scene(s) written to {output_dir}")
+    logger.info(
+        f"Base duo body compose: {len(written)} scene(s) -> {output_dir} "
+        f"[{', '.join(written)}]"
+    )
     return str(output_dir)
 
 
@@ -490,14 +519,9 @@ def compose_duo_face(
 ) -> str | None:
     """Compose two people's face cutouts onto every matching fru_duo scene.
 
-    Geometrically identical to diagnostic-mode `compose_duo` — same
-    warp_and_blend_face call per person, same face_anchor_1/face_anchor_2
-    config shape — and deliberately kept as a separate function rather than a
-    re-export of it, for two reasons specific to base mode: output must land
-    in the shared display/ dir under the FACE_PREFIX name (so it neither
-    collides with nor is mistaken for the body slides sitting beside it), and
-    it must be written as JPEG like the rest of the base cache. compose_duo
-    itself stays exactly as it is, still serving diagnostic mode.
+    The two-person form of compose_single_face: the same warp per person,
+    against face_anchor_1 and face_anchor_2. Unlike the single path it
+    gender-filters on the PAIR — see _duo_gender_allows.
     """
     if _cache_hit(output_dir, FACE_PREFIX):
         logger.info(f"Base duo face cache hit on disk: {output_dir}")
@@ -523,7 +547,7 @@ def compose_duo_face(
     if not scenes_config:
         return None
 
-    written = 0
+    written: list[str] = []
     for scene_id, meta in scenes_config.items():
         if not _duo_gender_allows(gender_a, gender_b, meta):
             continue
@@ -533,7 +557,7 @@ def compose_duo_face(
         if anchor_a is None or anchor_b is None:
             continue
 
-        scene_file = _find_scene_file(scenes_dir, scene_id)
+        scene_file = find_scene_file(scenes_dir, scene_id)
         if scene_file is None:
             continue
         scene = load_alpha_bgra(scene_file)
@@ -556,10 +580,13 @@ def compose_duo_face(
             continue
 
         if _write_scene(scene, output_dir, f"{FACE_PREFIX}{scene_id}"):
-            written += 1
+            written.append(scene_label(scene_id, meta))
 
     if not written:
         logger.warning("Base duo face compose: no scenes produced any output")
         return None
-    logger.info(f"Base duo face compose: {written} scene(s) written to {output_dir}")
+    logger.info(
+        f"Base duo face compose: {len(written)} scene(s) -> {output_dir} "
+        f"[{', '.join(written)}]"
+    )
     return str(output_dir)

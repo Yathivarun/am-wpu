@@ -1,5 +1,6 @@
 {
   "1": {
+    "name": "1",
     "gender": ["male"],
     "face_anchor_1": {
       "target_eye_midpoint": [638, 418],
@@ -13,6 +14,7 @@
     }
   },
   "2": {
+    "name": "2",
     "gender": ["male"],
     "face_anchor_1": {
       "target_eye_midpoint": [579, 856],
@@ -25,8 +27,8 @@
       "target_tilt_angle": 0
     }
   },
-
   "3": {
+    "name": "3",
     "gender": ["female"],
     "face_anchor_1": {
       "target_eye_midpoint": [703, 541],
@@ -39,8 +41,8 @@
       "target_tilt_angle": -3
     }
   },
-
   "4": {
+    "name": "4",
     "gender": ["male", "female"],
     "face_anchor_1": {
       "target_eye_midpoint": [713, 512],

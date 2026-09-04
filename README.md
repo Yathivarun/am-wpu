@@ -133,8 +133,15 @@ Backgrounds and their placement configs live in `data/base_scenes/`:
 | `fru_duo/` | two faces |
 
 Each directory has numbered image files and a `scenes_config.json` whose keys
-are the image filename stems. See `data/base_scenes/README.md` for the config
-shapes and how to tune anchors.
+are the image filename stems. After adding, removing or renaming a background,
+regenerate the derived `name` fields:
+
+```bash
+python scripts/sync_scene_names.py
+```
+
+See `data/base_scenes/README.md` for the config shapes, the gender rules and
+how to tune anchors.
 
 ## Troubleshooting
 

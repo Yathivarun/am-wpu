@@ -11,9 +11,18 @@ config omits scenes it has images for).
 """
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scripts.sync_scene_names import sync  # noqa: E402
+from wpu_client.services.face_recognition.base_composer import (  # noqa: E402
+    derive_scene_name,
+    find_scene_file,
+)
 
 BASE_SCENES = Path("data/base_scenes")
 
@@ -142,3 +151,37 @@ def test_duo_anchors_are_distinct():
             meta["face_anchor_1"]["target_eye_midpoint"]
             != meta["face_anchor_2"]["target_eye_midpoint"]
         ), f"fru_duo[{scene_id}]"
+
+
+@pytest.mark.parametrize("path", ALL_CONFIGS, ids=lambda p: p.parent.name)
+def test_every_entry_carries_a_name(path):
+    """`name` is what makes these files readable without cross-referencing the
+    directory listing, and what log lines quote when a slide is composed."""
+    for scene_id, meta in _load(path).items():
+        assert "name" in meta, f"{path.parent.name}[{scene_id}] has no name"
+        assert isinstance(meta["name"], str) and meta["name"].strip(), (
+            f"{path.parent.name}[{scene_id}]: name must be a non-empty string"
+        )
+
+
+@pytest.mark.parametrize("path", ALL_CONFIGS, ids=lambda p: p.parent.name)
+def test_names_match_their_background_image(path):
+    """`name` is derived, never authored — hand-editing it would drift the
+    moment a background is renamed."""
+    for scene_id, meta in _load(path).items():
+        image = find_scene_file(path.parent, scene_id)
+        expected = derive_scene_name(image) if image else scene_id
+        assert meta["name"] == expected, (
+            f"{path.parent.name}[{scene_id}]: name is {meta['name']!r}, "
+            f"expected {expected!r} — run scripts/sync_scene_names.py"
+        )
+
+
+@pytest.mark.parametrize("path", ALL_CONFIGS, ids=lambda p: p.parent.name)
+def test_configs_are_in_sync_with_disk(path):
+    """The whole-file check the sync script performs, so adding a background
+    without regenerating fails here rather than going unnoticed."""
+    changed, notes = sync(path, check_only=True)
+    assert not changed, (
+        f"{path} is out of sync — run scripts/sync_scene_names.py\n" + "\n".join(notes)
+    )

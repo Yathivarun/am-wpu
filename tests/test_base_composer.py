@@ -24,6 +24,8 @@ from wpu_client.services.face_recognition.base_composer import (
     _gender_allows,
     _paste_body,
     compose_single_body,
+    derive_scene_name,
+    scene_label,
 )
 
 SCENE_W, SCENE_H = 400, 300
@@ -308,3 +310,28 @@ def test_mixed_never_matches_a_single_person():
     for them in the single-person path."""
     assert _gender_allows("male", {"gender": ["mixed"]}) is False
     assert _gender_allows("female", {"gender": ["mixed"]}) is False
+
+
+# ── scene names ─────────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "filename,expected",
+    [
+        # What the shipped scenes look like today: nothing to humanise.
+        ("4.png", "4"),
+        ("data/base_scenes/fru_duo/4.png", "4"),
+        # What the field is for, once backgrounds get real names.
+        ("winter_market.jpg", "Winter Market"),
+        ("rooftop-sunset.png", "Rooftop Sunset"),
+        ("Lobby_Desk.jpeg", "Lobby Desk"),
+        ("stage_2.png", "Stage 2"),
+    ],
+)
+def test_derive_scene_name(filename, expected):
+    assert derive_scene_name(filename) == expected
+
+
+def test_scene_label_falls_back_to_the_id():
+    assert scene_label("4", {}) == "4"
+    # A name identical to the id adds nothing to a log line.
+    assert scene_label("4", {"name": "4"}) == "4"
+    assert scene_label("4", {"name": "Winter Market"}) == "4 (Winter Market)"
