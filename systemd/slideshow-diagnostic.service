@@ -4,7 +4,7 @@
 
 [Unit]
 Description=WPU slideshow — diagnostic mode (local recognition, 3 seeded people)
-Conflicts=slideshow-server.service
+Conflicts=slideshow-server.service slideshow-only.service
 
 [Service]
 Type=simple

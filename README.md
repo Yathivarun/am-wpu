@@ -50,9 +50,13 @@ git clone <repo> && cd am-wpu-client
 ./scripts/setup.sh
 ```
 
-`setup.sh` creates a `--system-site-packages` venv (so `picamera2` and `gi`
-resolve from apt), installs the dependencies, verifies the three ONNX models
-are present, and prints the config keys worth checking.
+`setup.sh` installs the system packages, creates a `--system-site-packages`
+venv (so `picamera2` and `gi` resolve from apt), installs the dependencies,
+verifies the three ONNX models are present, installs the three systemd units,
+enables server mode on boot, and finishes with a pre-flight check.
+
+It installs but does not *start* anything, so the camera stays free and you
+can fix the config before a kiosk goes live.
 
 Then create a config and point it at your server:
 
@@ -75,26 +79,123 @@ cp config/config.yaml.example config/config.yaml
 gallery, which is empty in production — it will recognise nobody. It exists
 for local diagnostic use.
 
-## Running
+## Health check
+
+Before starting anything — and any time a unit misbehaves — ask it what is
+wrong:
 
 ```bash
-python main.py                      # both services
+python main.py --check
+```
+
+```
+wpu-client pre-flight — kiosk-07 — base mode
+
+  deps     OK    numpy 1.26.4, opencv 4.11.0, onnxruntime 1.29.0, ...
+  system   OK    picamera2 + gtk4 import
+  models   OK    3/3 present (45 MB)
+  config   OK    host=10.0.0.5:8000 model=mobilenet scale_mode=fill
+  scenes   OK    sau_single 6, sau_duo 4, fru_single 9, fru_duo 4
+  server   FAIL  10.0.0.5:8000 unreachable (ConnectError: ...)
+  camera   OK    imx708 claimable
+  logs     OK    /var/log/wpu-client
+  disk     OK    41203 MB free of 61055 MB
+
+FAIL — 1 check(s) failed: server
+```
+
+It starts no services, opens the camera only when no unit is holding it, and
+**exits 1 if any check fails** — so a fleet tool can assert on it directly.
+`--json` emits the same result as a machine-readable object on stdout:
+
+```bash
+python main.py --check --json
+python main.py --check --diagnostic   # checks the gallery instead of the server
+```
+
+Warnings never fail the run. They flag a unit that works but probably not as
+you intended — most often a missing `config/config.yaml`, which leaves the
+client on built-in defaults pointing at a hardcoded host.
+
+## Services
+
+Three systemd units are installed by `setup.sh`. They are mutually exclusive:
+the two recognition modes both hold the camera, and all three drive the
+fullscreen display, so starting one stops the others.
+
+| Unit | What it runs | On boot |
+|---|---|---|
+| `slideshow-server.service` | Recognition + slideshow, identities from the server | **enabled** |
+| `slideshow-diagnostic.service` | Recognition + slideshow, identities from the local gallery — fully offline | disabled |
+| `slideshow-only.service` | Slideshow alone — no camera, no models, no server | disabled |
+
+Only `slideshow-server` starts on boot. The other two are installed ready to
+go and turned on deliberately.
+
+`scripts/switch-mode.sh` wraps the whole lifecycle:
+
+```bash
+scripts/switch-mode.sh server        # start server mode (stops the others)
+scripts/switch-mode.sh diagnostic    # start offline mode
+scripts/switch-mode.sh only          # start the display alone
+scripts/switch-mode.sh stop          # stop all three, release camera + display
+scripts/switch-mode.sh status        # what is running, and what starts on boot
+scripts/switch-mode.sh logs          # follow the running unit's log
+scripts/switch-mode.sh logs diagnostic
+scripts/switch-mode.sh enable only   # change which mode starts on boot
+scripts/switch-mode.sh disable only
+scripts/switch-mode.sh check         # pre-flight, same as main.py --check
+```
+
+`status` prints both axes, which are independent — a unit can be running now
+without starting on boot, and vice versa:
+
+```
+UNIT                           ACTIVE     ON-BOOT
+slideshow-server.service       active     enabled
+slideshow-diagnostic.service   inactive   disabled
+slideshow-only.service         inactive   disabled
+```
+
+`enable` switches which mode owns boot: it disables the other two first, so
+they can never race for the camera at startup.
+
+Underneath it is ordinary systemd, if you prefer it directly:
+
+```bash
+sudo systemctl start|stop|restart slideshow-server.service
+sudo systemctl status slideshow-server.service
+sudo systemctl enable|disable slideshow-server.service
+journalctl -u slideshow-server.service -f
+journalctl -u slideshow-server.service --since "1 hour ago"
+```
+
+### Logs
+
+Every mode logs to stdout (captured by journald) and to
+`/var/log/wpu-client/app.log`. Lines carry the hostname, so a fleet's logs
+stay legible once aggregated:
+
+```
+2026-09-04 16:11:35 - kiosk-07 - wpu_client.services... - INFO - Local match: Varun
+```
+
+If the log directory is missing or not writable the client still starts and
+logs to stdout only — `main.py --check` reports it under `logs`.
+
+## Running by hand
+
+Stop the services first; whichever is active holds the camera.
+
+```bash
+scripts/switch-mode.sh stop
+
+python main.py                      # both services, server mode
 python main.py --diagnostic         # offline mode, no server
-python main.py --log-level DEBUG    # verbose
 python main.py --service slideshow  # slideshow only
+python main.py --log-level DEBUG    # verbose
+python main.py --config path.yaml   # alternate config
 ```
-
-Installed as systemd units, use the mode switcher:
-
-```bash
-scripts/switch-mode.sh server       # base mode
-scripts/switch-mode.sh diagnostic   # offline mode
-scripts/switch-mode.sh stop         # stop both, release the camera
-scripts/switch-mode.sh status
-```
-
-Only one unit may run at a time — whichever is active holds the camera
-exclusively. Stop both before running `main.py` or `seed_face.py` by hand.
 
 ## Modes
 
@@ -153,8 +254,10 @@ how to tune anchors.
 | Recognised, but no slides | No cutouts came back, or no scene matched their gender — run with `--log-level DEBUG` and look for `compose` lines |
 | Nobody is ever recognised | `model` must be `mobilenet`; `sface` queries an empty gallery |
 | Image is stretched or cropped wrong | `scale_mode` doesn't match the panel |
+| Unit won't start, no useful error | `journalctl -u slideshow-server.service -n 50` |
+| Wrong mode came up after a reboot | `scripts/switch-mode.sh status` — check the ON-BOOT column |
 
-Logs go to stdout and `/var/log/wpu-client/app.log`.
+Start with `python main.py --check`; it covers most of the table above.
 
 ## Development
 
@@ -167,8 +270,10 @@ ruff check .
 ## Layout
 
 ```
-main.py                       entry point, starts and supervises services
+main.py                       entry point, --check, starts/supervises services
+wpu_client/health.py          pre-flight checks behind main.py --check
 config/                       config.yaml + annotated example
+systemd/                      unit templates for the three service modes
 models/                       YuNet detector, MobileFaceNet + SFace embedders
 data/base_scenes/             scene backgrounds + placement configs
 data/stock_images/            idle slideshow content
