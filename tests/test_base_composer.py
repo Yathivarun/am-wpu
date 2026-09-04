@@ -20,6 +20,7 @@ from wpu_client.services.face_recognition.base_composer import (
     BODY_PREFIX,
     FACE_PREFIX,
     _cache_hit,
+    _duo_gender_allows,
     _gender_allows,
     _paste_body,
     compose_single_body,
@@ -255,3 +256,55 @@ def test_compose_single_body_reuses_cached_output(tmp_path):
 )
 def test_gender_allows(gender, meta, expected):
     assert _gender_allows(gender, meta) is expected
+
+
+# ── duo gender selection ────────────────────────────────────────────────
+# A duo scene constrains the PAIR, not each person: ["male", "female"] means
+# "two men or two women", and a mixed pair needs its own "mixed" opt-in.
+@pytest.mark.parametrize(
+    "allowed,pair,expected",
+    [
+        # Two men.
+        (["male"], ("male", "male"), True),
+        (["male"], ("female", "female"), False),
+        (["male"], ("male", "female"), False),
+        # Two women.
+        (["female"], ("female", "female"), True),
+        (["female"], ("male", "male"), False),
+        (["female"], ("female", "male"), False),
+        # Either same-gender pairing — NOT a mixed pair.
+        (["male", "female"], ("male", "male"), True),
+        (["male", "female"], ("female", "female"), True),
+        (["male", "female"], ("male", "female"), False),
+        # Mixed only.
+        (["mixed"], ("male", "female"), True),
+        (["mixed"], ("female", "male"), True),
+        (["mixed"], ("male", "male"), False),
+        (["mixed"], ("female", "female"), False),
+        # Lists combine.
+        (["male", "mixed"], ("male", "male"), True),
+        (["male", "mixed"], ("male", "female"), True),
+        (["male", "mixed"], ("female", "female"), False),
+    ],
+)
+def test_duo_gender_allows(allowed, pair, expected):
+    assert _duo_gender_allows(pair[0], pair[1], {"gender": allowed}) is expected
+
+
+@pytest.mark.parametrize("meta", [{}, {"gender": []}])
+def test_duo_scene_without_a_gender_key_takes_any_pair(meta):
+    assert _duo_gender_allows("male", "female", meta) is True
+
+
+@pytest.mark.parametrize("pair", [(None, "male"), ("male", None), (None, None), ("", "male")])
+def test_duo_gender_is_permissive_when_either_is_unknown(pair):
+    """The server may not return gender yet. Excluding every scene would
+    leave those visitors with no slides at all."""
+    assert _duo_gender_allows(pair[0], pair[1], {"gender": ["mixed"]}) is True
+
+
+def test_mixed_never_matches_a_single_person():
+    """One person is not a pair, so a mixed-only scene must not be composed
+    for them in the single-person path."""
+    assert _gender_allows("male", {"gender": ["mixed"]}) is False
+    assert _gender_allows("female", {"gender": ["mixed"]}) is False

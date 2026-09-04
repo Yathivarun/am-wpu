@@ -204,15 +204,49 @@ def _write_scene(scene_bgra: np.ndarray, output_dir: Path, name: str) -> bool:
 
 
 def _gender_allows(gender: str | None, meta: dict) -> bool:
-    """Whether a scene accepts this person's gender.
+    """Whether a single-person scene accepts this person's gender.
 
-    Permissive when gender is unknown — mirrors compose_duo. The server's
-    gender field may not be rolled out yet, and a None gender excluding every
-    scene would silently hide all slides.
+    Permissive when gender is unknown: the server's gender field may not be
+    rolled out yet, and a None gender excluding every scene would silently
+    hide all slides.
+
+    A scene listing only "mixed" is a duo scene and matches nobody here — one
+    person is never a mixed pair — which is the intended outcome.
     """
     if not gender:
         return True
     return gender in meta.get("gender", ["male", "female", "unknown"])
+
+
+def _duo_gender_allows(gender_a: str | None, gender_b: str | None, meta: dict) -> bool:
+    """Whether a duo scene accepts this PAIR.
+
+    A duo scene is art with two people posed in it, so what it constrains is
+    the combination, not each person independently:
+
+        ["male"]            two men
+        ["female"]          two women
+        ["male", "female"]  two men OR two women — same-gender either way
+        ["mixed"]           one man and one woman
+        ["male", "mixed"]   two men OR a mixed pair (lists combine)
+
+    "mixed" is deliberately NOT the same as listing both genders. Art staged
+    for two men rarely works for a man and a woman, so ["male", "female"]
+    keeps its established meaning ("either same-gender pairing") and mixed
+    pairs need their own opt-in.
+
+    Same permissive fallback as the single-person path: an absent gender key,
+    or a pair where either gender is unknown, matches everything rather than
+    silently leaving a visitor with no slides.
+    """
+    allowed = meta.get("gender")
+    if not allowed:
+        return True
+    if not gender_a or not gender_b:
+        return True
+    if gender_a != gender_b:
+        return "mixed" in allowed
+    return gender_a in allowed
 
 
 def _paste_body(scene_bgra: np.ndarray, cutout_bgra: np.ndarray, scale: float, anchor) -> bool:
@@ -491,10 +525,7 @@ def compose_duo_face(
 
     written = 0
     for scene_id, meta in scenes_config.items():
-        # Same permissive rule as compose_duo: a scene is skipped only when
-        # BOTH known genders are disallowed.
-        allowed = meta.get("gender", ["male", "female", "unknown"])
-        if gender_a and gender_a not in allowed and gender_b and gender_b not in allowed:
+        if not _duo_gender_allows(gender_a, gender_b, meta):
             continue
 
         anchor_a = meta.get("face_anchor_1")

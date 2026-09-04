@@ -117,7 +117,19 @@ def test_face_gender_lists_are_lowercase_and_known(path):
         assert isinstance(genders, list) and genders, f"{scene_id}: empty gender list"
         for g in genders:
             assert g == g.lower(), f"{scene_id}: {g!r} must be lowercase"
-            assert g in ("male", "female", "unknown"), f"{scene_id}: unknown gender {g!r}"
+            assert g in ("male", "female", "unknown", "mixed"), (
+                f"{scene_id}: unknown gender {g!r}"
+            )
+
+
+def test_mixed_is_only_used_in_duo_configs():
+    """'mixed' describes a PAIR — one man and one woman. In a single-person
+    config it can never match, so a scene carrying it would silently never be
+    shown."""
+    for scene_id, meta in _load(FACE_SINGLE).items():
+        assert "mixed" not in meta.get("gender", []), (
+            f"fru_single[{scene_id}]: 'mixed' has no meaning for one person"
+        )
 
 
 def test_duo_anchors_are_distinct():

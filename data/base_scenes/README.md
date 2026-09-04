@@ -26,9 +26,10 @@ its own separate slides.
 | `fru_single/` | one face | `{"<id>": {"gender": [...], "face_anchor": {...}}}` |
 | `fru_duo/` | two faces | `{"<id>": {"gender": [...], "face_anchor_1": {...}, "face_anchor_2": {...}}}` |
 
-`fru_duo/` uses the same shape as the diagnostic `data/duo_scenes/scenes_config.json`,
-just in its own directory. These four dirs are entirely separate from
-`data/duo_scenes/` and `data/duo_output/`, which stay diagnostic-mode-only.
+Both modes compose from these same four directories. Base mode uses the
+cutouts it downloads; diagnostic mode uses the cutouts in each person's
+`data/embeddings/<slug>/sketches/` folder. Nothing about the scenes differs
+between them.
 
 ## Backgrounds
 
@@ -86,23 +87,48 @@ eyes composes no face slides.
 
 ### `gender`
 
-Optional list of genders a scene accepts; defaults to
-`["male", "female", "unknown"]`. Used by the FRU paths only — body configs have
-no gender filter, matching the server's `body/crops.json`.
+Optional list of genders a scene accepts. Used by the FRU paths only — body
+configs have no gender filter, matching the server's `body/crops.json`. Omit it
+and the scene accepts anyone. Matching is lowercase.
 
-Matching is lowercase. A person whose gender is unknown is **never** excluded
-(the server may not send the field yet). For duo, a scene is skipped only when
-both people's genders are known and both are disallowed — so a mixed pair can
-still land on a gender-restricted scene.
+**Single (`fru_single/`)** — the list is the set of genders the scene suits:
+
+| Value | Accepts |
+|---|---|
+| `["male"]` | a man |
+| `["female"]` | a woman |
+| `["male", "female"]` | either |
+
+**Duo (`fru_duo/`)** — a duo scene is art with two people posed in it, so the
+list constrains the **pair**, not each person:
+
+| Value | Accepts |
+|---|---|
+| `["male"]` | two men |
+| `["female"]` | two women |
+| `["male", "female"]` | two men **or** two women — same-gender either way |
+| `["mixed"]` | one man and one woman |
+| `["male", "mixed"]` | two men **or** a mixed pair (values combine) |
+
+`["male", "female"]` does **not** mean "any pair". Art staged for two men
+rarely reads correctly for a man and a woman, so mixed pairs are their own
+opt-in via `"mixed"`. `"mixed"` only makes sense in a duo config — in
+`fru_single/` it can never match, and the test suite rejects it there.
+
+A person whose gender is unknown is **never** excluded (the server may not send
+the field yet); a pair with either gender unknown matches every scene.
 
 ## Output
 
-Composed slides are cached under `data/base_assets/` (gitignored) as JPEG:
+Composed slides are cached as JPEG under one root per mode (both gitignored):
 
 ```
 data/base_assets/<registration_id>/display/sau_scene_<id>.jpg, fru_scene_<id>.jpg
 data/base_assets/duo/<id_a>__<id_b>/display/...
+data/diagnostic_assets/<slug>/display/...
+data/diagnostic_assets/duo/<slug_a>__<slug_b>/display/...
 ```
 
-That directory is size-capped by `base_assets_max_bytes` and LRU-evicted, duo
-pairs first. Deleting it is always safe — everything in it is regenerable.
+Each root is size-capped by `base_assets_max_bytes` and LRU-evicted, duo pairs
+first. Deleting either is always safe — everything in them is regenerable, and
+that is also how you force a recompose after retuning anchors.
