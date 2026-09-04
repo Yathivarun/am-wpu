@@ -1,6 +1,6 @@
 {
   "1": {
-    "name": "1",
+    "name": "Horse and Rider",
     "gender": ["male"],
     "face_anchor_1": {
       "target_eye_midpoint": [638, 418],
@@ -14,7 +14,7 @@
     }
   },
   "2": {
-    "name": "2",
+    "name": "Meditation",
     "gender": ["male"],
     "face_anchor_1": {
       "target_eye_midpoint": [579, 856],
@@ -28,7 +28,7 @@
     }
   },
   "3": {
-    "name": "3",
+    "name": "Dancers",
     "gender": ["female"],
     "face_anchor_1": {
       "target_eye_midpoint": [703, 541],
@@ -42,8 +42,8 @@
     }
   },
   "4": {
-    "name": "4",
-    "gender": ["male", "female"],
+    "name": "Dancers",
+    "gender": ["mixed"],
     "face_anchor_1": {
       "target_eye_midpoint": [713, 512],
       "target_eye_distance": 76,

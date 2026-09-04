@@ -1,6 +1,6 @@
 {
   "1": {
-    "name": "1",
+    "name": "scholar",
     "gender": ["male"],
     "face_anchor": {
       "target_eye_midpoint": [882, 610],
@@ -9,7 +9,7 @@
     }
   },
   "2": {
-    "name": "2",
+    "name": "king on horse",
     "gender": ["male"],
     "face_anchor": {
       "target_eye_midpoint": [850, 480],
@@ -18,7 +18,7 @@
     }
   },
   "3": {
-    "name": "3",
+    "name": "meditation",
     "gender": ["male"],
     "face_anchor": {
       "target_eye_midpoint": [898, 669],
@@ -27,7 +27,7 @@
     }
   },
   "4": {
-    "name": "4",
+    "name": "King on mountain",
     "gender": ["male"],
     "face_anchor": {
       "target_eye_midpoint": [816, 690],
@@ -36,7 +36,7 @@
     }
   },
   "5": {
-    "name": "5",
+    "name": "meditation",
     "gender": ["female"],
     "face_anchor": {
       "target_eye_midpoint": [882, 590],
@@ -45,7 +45,7 @@
     }
   },
   "6": {
-    "name": "6",
+    "name": "warrior on horse",
     "gender": ["female"],
     "face_anchor": {
       "target_eye_midpoint": [867, 584],
@@ -54,7 +54,7 @@
     }
   },
   "7": {
-    "name": "7",
+    "name": "princess",
     "gender": ["female"],
     "face_anchor": {
       "target_eye_midpoint": [873, 590],
@@ -63,7 +63,7 @@
     }
   },
   "8": {
-    "name": "8",
+    "name": "warrior",
     "gender": ["female"],
     "face_anchor": {
       "target_eye_midpoint": [890, 595],
@@ -72,7 +72,7 @@
     }
   },
   "9": {
-    "name": "9",
+    "name": "dancer",
     "gender": ["female"],
     "face_anchor": {
       "target_eye_midpoint": [939, 395],

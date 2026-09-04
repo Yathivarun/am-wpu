@@ -1,31 +1,31 @@
 {
   "1": {
-    "name": "1",
+    "name": "Basavanna statue",
     "scale": 0.3588,
     "anchor": [883, 2425]
   },
   "2": {
-    "name": "2",
+    "name": "Inside Mantapa",
     "scale": 0.1372,
     "anchor": [1185, 1580]
   },
   "3": {
-    "name": "3",
+    "name": "outside Temple",
     "scale": 0.2016,
     "anchor": [1084, 1810]
   },
   "4": {
-    "name": "4",
+    "name": "Mantapa",
     "scale": 0.2061,
     "anchor": [931, 1855]
   },
   "5": {
-    "name": "5",
+    "name": "Balcony",
     "scale": 0.2714,
     "anchor": [869, 1805]
   },
   "6": {
-    "name": "6",
+    "name": "street",
     "scale": 0.2676,
     "anchor": [1026, 1892]
   }
