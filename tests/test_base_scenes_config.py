@@ -120,14 +120,6 @@ def test_face_gender_lists_are_lowercase_and_known(path):
             assert g in ("male", "female", "unknown"), f"{scene_id}: unknown gender {g!r}"
 
 
-def test_duo_configs_cover_the_same_scenes_as_their_single_counterparts():
-    """Not required by the code — a scene may exist in one and not the other —
-    but the shipped placeholders are derived from the single configs, so a
-    divergence means someone edited one and forgot the other."""
-    assert set(_load(BODY_DUO)) == set(_load(BODY_SINGLE))
-    assert set(_load(FACE_DUO)) == set(_load(FACE_SINGLE))
-
-
 def test_duo_anchors_are_distinct():
     """Two people stacked on the same anchor would render one on top of the
     other — always a config mistake."""

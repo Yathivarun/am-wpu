@@ -32,10 +32,6 @@ logger = logging.getLogger(__name__)
 LEGACY_EMBEDDING_FILE = "embedding.npy"  # pre-multi-model seeds (sface 128-D)
 META_FILE = "meta.json"
 SKETCHES_DIR = "sketches"
-# Alpha-cutout face images used for duo scene composition — pre-cropped,
-# transparent-background PNGs (see mask_to_alpha.py). Not the final rendered
-# sketches; these are the raw compositing source faces.
-ALPHA_SUBDIR = "images"
 
 
 def _embedding_file(model: str) -> str:
@@ -48,9 +44,11 @@ class GalleryEntry:
     name: str
     # model name → L2-normalised vector (e.g. {"sface": 128-D, "mobilenet": 512-D}).
     vectors: dict[str, np.ndarray] = field(default_factory=dict)
-    sketch_dir: str = ""  # data/embeddings/<slug>/sketches — this person's sketches
-    alpha_dir: str = ""  # data/embeddings/<slug>/sketches/images — duo-compose source faces
+    sketch_dir: str = ""  # data/embeddings/<slug>/sketches — this person's raw cutouts
     gender: Optional[str] = None  # optional metadata; used for scene gender filtering
+    # The whole parsed meta.json, so local_assets can honour explicit
+    # `sau`/`fru` filename keys without re-reading the file.
+    meta: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -110,8 +108,8 @@ class DiagnosticGallery:
                     name=meta.get("name", slug),
                     vectors=vectors,
                     sketch_dir=os.path.join(person_dir, SKETCHES_DIR),
-                    alpha_dir=os.path.join(person_dir, SKETCHES_DIR, ALPHA_SUBDIR),
                     gender=str(gender).lower() if gender else None,
+                    meta=meta,
                 ))
             except Exception as e:
                 logger.error("Failed to load gallery entry '%s': %s", slug, e)

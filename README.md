@@ -108,8 +108,18 @@ against a local gallery under `data/embeddings/`, seeded with:
 python scripts/seed_face.py --name "Varun" --face varun.jpg
 ```
 
-Everything after the match — cutouts, composition, display — is the same as
-base mode; only the source of the identity and the cutouts differs.
+Each person's two cutouts go in `data/embeddings/<slug>/sketches/`. Which file
+is the body and which is the face is worked out from `meta.json`, then the
+filename, then the image's proportions — so `person.png` + `d6.png` resolve
+correctly as they are. To pin it explicitly, add to `meta.json`:
+
+```json
+{ "name": "Varun", "gender": "male", "sau": "person.png", "fru": "d2.png" }
+```
+
+Everything after the match — composition, caching, display — is the same code
+as base mode, onto the same `data/base_scenes/` backgrounds. Only the source
+of the identity and the cutouts differs.
 
 ## Scenes
 

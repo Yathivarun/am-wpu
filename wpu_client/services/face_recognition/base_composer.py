@@ -5,8 +5,7 @@ This is the on-device replacement for the server pre-rendering every
 person×scene combination: the server stores one cutout pair per person, and
 the Pi composes on demand. Geometry is ported from the server's
 app/sketch/{sau,fru}_postprocess.py, reimplemented in cv2/numpy to match the
-style of duo_composer.py (whose building blocks this module reuses) rather
-than pulling PIL into the client.
+style of the rest of the client rather than pulling PIL in.
 
 SAU and FRU are different composition mechanics and are NEVER cross-composed
 — each produces its own separate slides:
@@ -14,8 +13,7 @@ SAU and FRU are different composition mechanics and are NEVER cross-composed
   SAU (body)  scale + bottom-center anchor, no rotation. `anchor` is where
               the FEET land, so the paste is centred horizontally on it and
               sits directly above it.
-  FRU (face)  eye-anchored affine warp (scale + rotate + translate), the
-              same transform diagnostic duo composition already uses.
+  FRU (face)  eye-anchored affine warp (scale + rotate + translate).
 
 Scene assets (supplied later — code must not assume they exist):
     data/base_scenes/
@@ -24,11 +22,14 @@ Scene assets (supplied later — code must not assume they exist):
                                                    "scale_2": f, "anchor_2": [x, y]}}
         fru_single/  scenes_config.json  {"<id>": {"gender": [...],
                                                    "face_anchor": {...}}}
-        fru_duo/     scenes_config.json  same shape as data/duo_scenes
+        fru_duo/     scenes_config.json  {"<id>": {"gender": [...],
+                                                   "face_anchor_1": {...},
+                                                   "face_anchor_2": {...}}}
         <id>.png     scene backgrounds, filename stem == json key
 
-These directories are entirely separate from data/duo_scenes/ and
-data/duo_output/, which remain diagnostic-mode-only.
+Both modes compose from these same directories: base mode from the cutouts it
+downloads, diagnostic mode from the cutouts sitting in a seeded gallery folder
+(see local_assets.py). Only where the cutouts come from differs.
 
 Every entry point returns the output directory on success or None when
 nothing was composable, and logs rather than raising — a missing asset must
@@ -37,24 +38,18 @@ never take down the recognition loop.
 
 import json
 import logging
+import math
 from pathlib import Path
 
 import cv2
 import numpy as np
-
-from wpu_client.services.face_recognition.duo_composer import (
-    detect_eye_kps,
-    load_alpha_bgra,
-    warp_and_blend_face,
-)
 
 logger = logging.getLogger(__name__)
 
 # Composed slides are photographic full-screen backgrounds, so JPEG is a far
 # better fit than PNG here: ~6x smaller on a real 2240x1918 scene with no
 # visible difference at projection distance, which matters on a kiosk that
-# caches per-person AND per-pair output. (Diagnostic duo_output keeps writing
-# PNG — untouched.)
+# caches per-person AND per-pair output.
 OUTPUT_SUFFIX = ".jpg"
 JPEG_QUALITY = 90
 
@@ -68,6 +63,89 @@ _SCENE_EXTENSIONS = (".png", ".jpg", ".jpeg")
 # for its own and skip composing altogether.
 BODY_PREFIX = "sau_scene_"
 FACE_PREFIX = "fru_scene_"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Cutout geometry primitives
+#
+# Shared by every entry point below. `warp_and_blend_face` is the eye-anchored
+# transform the whole FRU path is built on; `_paste_body` further down is its
+# SAU counterpart.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def load_alpha_bgra(path: Path) -> np.ndarray | None:
+    """Read an image as 4-channel BGRA, whatever it was stored as."""
+    img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+    elif img.shape[2] == 3:
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+    return img
+
+
+def detect_eye_kps(detector: cv2.FaceDetectorYN, face_bgr: np.ndarray) -> np.ndarray | None:
+    """Row layout: [x,y,w,h, 5x(lm_x,lm_y), score]; first two landmarks = eyes."""
+    h, w = face_bgr.shape[:2]
+    detector.setInputSize((w, h))
+    _, faces = detector.detect(face_bgr)
+    if faces is None or len(faces) == 0:
+        return None
+    best = max(faces, key=lambda row: float(row[2]) * float(row[3]))
+    return np.asarray(best[4:8], dtype=np.float32).reshape(2, 2)
+
+
+def warp_and_blend_face(
+    scene_bgra: np.ndarray,
+    face_bgra: np.ndarray,
+    face_kps: np.ndarray,
+    target_eye_midpoint: tuple[float, float],
+    target_eye_distance: float,
+    target_tilt_angle: float,
+) -> None:
+    """One warpAffine (scale+rotate+translate combined) + bounded alpha blend."""
+    left_eye = face_kps[0].astype(np.float64)
+    right_eye = face_kps[1].astype(np.float64)
+
+    eye_dist = float(np.linalg.norm(right_eye - left_eye))
+    if eye_dist < 1.0:
+        eye_dist = 1.0
+    mid = ((left_eye[0] + right_eye[0]) / 2.0, (left_eye[1] + right_eye[1]) / 2.0)
+
+    dx = right_eye[0] - left_eye[0]
+    dy = right_eye[1] - left_eye[1]
+    face_angle_deg = math.degrees(math.atan2(-dy, dx))
+
+    scale = float(target_eye_distance) / eye_dist
+    rotation_deg = target_tilt_angle - face_angle_deg
+
+    M = cv2.getRotationMatrix2D(center=mid, angle=rotation_deg, scale=scale)
+    M[0, 2] += target_eye_midpoint[0] - mid[0]
+    M[1, 2] += target_eye_midpoint[1] - mid[1]
+
+    scene_h, scene_w = scene_bgra.shape[:2]
+    warped = cv2.warpAffine(
+        face_bgra, M, (scene_w, scene_h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0, 0),
+    )
+
+    alpha_channel = warped[:, :, 3]
+    ys, xs = np.nonzero(alpha_channel)
+    if len(xs) == 0:
+        return
+
+    x1, x2 = xs.min(), xs.max() + 1
+    y1, y2 = ys.min(), ys.max() + 1
+
+    alpha = (alpha_channel[y1:y2, x1:x2].astype(np.float32) / 255.0)[..., None]
+    scene_roi = scene_bgra[y1:y2, x1:x2, :3].astype(np.float32)
+    face_roi = warped[y1:y2, x1:x2, :3].astype(np.float32)
+    blended = scene_roi * (1 - alpha) + face_roi * alpha
+    scene_bgra[y1:y2, x1:x2, :3] = blended.astype(np.uint8)
 
 
 def _load_scenes_config(scenes_config_path: Path) -> dict:
