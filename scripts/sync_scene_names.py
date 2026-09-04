@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
-"""Keep the `name` field in every data/base_scenes/*/scenes_config.json in sync
-with the background image each entry points at.
+"""Give every entry in data/base_scenes/*/scenes_config.json a `name`.
 
 `name` is documentation, not behaviour: composition keys off the scene id, and
 `name` exists so a config can be read at a glance and so log lines say which
-picture a slide came from. Because it is derived rather than authored, it must
-never be hand-edited — regenerate it instead.
+picture a slide came from — "Horse and Rider" rather than "1".
 
-Run this after adding, removing or renaming a background:
+A good name describes what the scene SHOWS, and only a person can write that.
+So this script never invents one over yours: it fills in entries that have no
+name yet, seeding them from the background's filename, and leaves every
+existing name alone. Rename a scene by editing it here.
 
-    python scripts/sync_scene_names.py            # rewrite the configs
-    python scripts/sync_scene_names.py --check    # report drift, change nothing
+Run it after adding a background, or after adding a key to a config:
 
---check is what the test suite uses, so a config that drifts fails CI rather
-than going unnoticed.
+    python scripts/sync_scene_names.py            # fill in what is missing
+    python scripts/sync_scene_names.py --check    # report gaps, change nothing
 
-An entry whose background is missing keeps its scene id as the name. That is a
-normal state — a key may be added before its art arrives — so it is reported
-but not treated as an error.
+--check is what the test suite uses, so an entry that reaches CI with no name
+fails rather than going unnoticed.
+
+An entry whose background is missing is seeded with its scene id. That is a
+normal state — a key may be added before its art arrives — and it is a
+placeholder worth replacing, not an error.
 """
 
 import argparse
@@ -59,39 +62,39 @@ def scene_configs() -> list[Path]:
     return sorted(BASE_SCENES_DIR.glob(f"*/{CONFIG_NAME}"))
 
 
-def expected_names(config_path: Path, config: dict) -> dict[str, str]:
-    """The `name` each entry in this config should carry."""
-    scenes_dir = config_path.parent
-    names = {}
-    for scene_id in config:
-        image = find_scene_file(scenes_dir, scene_id)
-        names[scene_id] = derive_scene_name(image) if image else scene_id
-    return names
+def seed_name(scenes_dir: Path, scene_id: str) -> str:
+    """A starting name for an entry that has none: its background's filename,
+    or the scene id when there is no background to read one from."""
+    image = find_scene_file(scenes_dir, scene_id)
+    return derive_scene_name(image) if image else scene_id
 
 
-def with_names(config: dict, names: dict[str, str]) -> dict:
-    """The config with `name` set, first, in every entry.
+def with_names(config: dict, scenes_dir: Path) -> dict:
+    """The config with `name` present, first, in every entry.
 
-    Entry order and every other field are preserved — this file is hand-tuned
-    and a reordering diff would bury the real change.
+    Existing names are carried through untouched. Entry order and every other
+    field are preserved too — these files are hand-tuned and a reordering diff
+    would bury the real change.
     """
     updated = {}
     for scene_id, meta in config.items():
         if not isinstance(meta, dict):
             updated[scene_id] = meta
             continue
+        name = meta.get("name")
+        if not (isinstance(name, str) and name.strip()):
+            name = seed_name(scenes_dir, scene_id)
         rest = {k: v for k, v in meta.items() if k != "name"}
-        updated[scene_id] = {"name": names[scene_id], **rest}
+        updated[scene_id] = {"name": name, **rest}
     return updated
 
 
 def sync(config_path: Path, check_only: bool) -> tuple[bool, list[str]]:
-    """Sync one config. Returns (changed, notes)."""
+    """Fill in missing names in one config. Returns (changed, notes)."""
     with open(config_path) as f:
         config = json.load(f)
 
-    names = expected_names(config_path, config)
-    updated = with_names(config, names)
+    updated = with_names(config, config_path.parent)
     changed = updated != config
 
     notes = []
@@ -99,11 +102,11 @@ def sync(config_path: Path, check_only: bool) -> tuple[bool, list[str]]:
     for scene_id, meta in config.items():
         if not isinstance(meta, dict):
             continue
-        if find_scene_file(config_path.parent, scene_id) is None:
-            notes.append(f"  {label}[{scene_id}]: no background image — named after its id")
-        elif meta.get("name") != names[scene_id]:
+        name = meta.get("name")
+        if not (isinstance(name, str) and name.strip()):
             notes.append(
-                f"  {label}[{scene_id}]: {meta.get('name')!r} -> {names[scene_id]!r}"
+                f"  {label}[{scene_id}]: no name — seeded {updated[scene_id]['name']!r}, "
+                f"replace it with what the scene shows"
             )
 
     if changed and not check_only:
@@ -134,12 +137,12 @@ def main() -> int:
             drifted.append(config_path)
 
     if not drifted:
-        print(f"{len(configs)} config(s) already in sync.")
+        print(f"{len(configs)} config(s): every entry has a name.")
         return 0
 
     if args.check:
         print(
-            f"\n{len(drifted)} config(s) out of sync. "
+            f"\n{len(drifted)} config(s) have entries with no name. "
             f"Run: python scripts/sync_scene_names.py"
         )
         return 1

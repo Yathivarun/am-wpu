@@ -19,10 +19,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.sync_scene_names import sync  # noqa: E402
-from wpu_client.services.face_recognition.base_composer import (  # noqa: E402
-    derive_scene_name,
-    find_scene_file,
-)
 
 BASE_SCENES = Path("data/base_scenes")
 
@@ -165,23 +161,15 @@ def test_every_entry_carries_a_name(path):
 
 
 @pytest.mark.parametrize("path", ALL_CONFIGS, ids=lambda p: p.parent.name)
-def test_names_match_their_background_image(path):
-    """`name` is derived, never authored — hand-editing it would drift the
-    moment a background is renamed."""
-    for scene_id, meta in _load(path).items():
-        image = find_scene_file(path.parent, scene_id)
-        expected = derive_scene_name(image) if image else scene_id
-        assert meta["name"] == expected, (
-            f"{path.parent.name}[{scene_id}]: name is {meta['name']!r}, "
-            f"expected {expected!r} — run scripts/sync_scene_names.py"
-        )
+def test_every_entry_has_a_name_the_script_agrees_with(path):
+    """The check the sync script performs, so an entry reaching CI without a
+    name fails here rather than going unnoticed.
 
-
-@pytest.mark.parametrize("path", ALL_CONFIGS, ids=lambda p: p.parent.name)
-def test_configs_are_in_sync_with_disk(path):
-    """The whole-file check the sync script performs, so adding a background
-    without regenerating fails here rather than going unnoticed."""
+    Names are authored, not derived — the script only seeds the ones that are
+    missing — so what is asserted is presence, never a particular value."""
     changed, notes = sync(path, check_only=True)
     assert not changed, (
-        f"{path} is out of sync — run scripts/sync_scene_names.py\n" + "\n".join(notes)
+        f"{path} has unnamed entries — run scripts/sync_scene_names.py\n"
+        + "\n".join(notes)
     )
+
