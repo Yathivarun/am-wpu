@@ -58,10 +58,47 @@ enables server mode on boot, and finishes with a pre-flight check.
 It installs but does not *start* anything, so the camera stays free and you
 can fix the config before a kiosk goes live.
 
+Steps can be run on their own — useful when re-applying one thing, and it is
+how a deploy tool drives it:
+
+```bash
+./scripts/setup.sh --list                # perms apt venv dirs models config units enable check
+./scripts/setup.sh --skip-apt            # everything but the slow half
+./scripts/setup.sh config units          # just these
+WPU_USER=dreamvu ./scripts/setup.sh      # when running as root; the kiosk never runs as root
+```
+
 Then create a config and point it at your server:
 
 ```bash
 cp config/config.yaml.example config/config.yaml
+```
+
+### Art assets
+
+The repo tracks the smallest set that boots a working kiosk — one background
+per scene directory, three stock images, and the models. The full collection
+lives on an asset host:
+
+```bash
+ASSETS_URL=http://192.168.1.10/wpu ./scripts/fetch_assets.sh
+./scripts/fetch_assets.sh --verify          # what is here, what is missing
+```
+
+`ASSETS_URL` may be `http(s)://`, `rsync://`, or a plain path (a mount, a USB
+stick, another checkout). Every asset is checksummed in `data/assets.manifest`;
+a file already present and correct is skipped, so a re-run resumes rather than
+restarts, and nothing is ever deleted.
+
+A unit that has not fetched still runs — it composes onto the backgrounds it
+has. `--check` reports the gap as `scenes WARN — N config key(s) have no
+image`.
+
+Adding art: drop it in, then regenerate the manifest and pack it for the host.
+
+```bash
+./scripts/make_assets.sh                    # manifest + wpu-assets.tar.gz
+./scripts/make_assets.sh --manifest         # manifest only
 ```
 
 ## Configuration
@@ -89,7 +126,7 @@ python main.py --check
 ```
 
 ```
-wpu-client pre-flight — kiosk-07 — base mode
+wpu-client v1.2.0 — pre-flight — kiosk-07 — base mode
 
   deps     OK    numpy 1.26.4, opencv 4.11.0, onnxruntime 1.29.0, ...
   system   OK    picamera2 + gtk4 import
@@ -330,9 +367,10 @@ deploy/logrotate/             rotation for /var/log/wpu-client/app.log
 models/                       YuNet detector, MobileFaceNet + SFace embedders
 data/base_scenes/             scene backgrounds + placement configs
 data/stock_images/            idle slideshow content
-data/embeddings/              diagnostic gallery (seeded people)
+data/embeddings/              diagnostic gallery (seeded people; fetched)
+data/assets.manifest          the complete art set, checksummed
 wpu_client/services/
   face_recognition/           detect, embed, identify, fetch, compose
   slideshow/                  GTK4 display
-scripts/                      setup, mode switch, alloy install, seeding
+scripts/                      setup, mode switch, alloy install, assets, seeding
 ```
