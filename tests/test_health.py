@@ -48,6 +48,9 @@ def test_json_is_parseable_and_names_what_failed():
     assert payload["failed"] == ["camera"]
     assert payload["warned"] == ["config"]
     assert payload["mode"] == "base"
+    # The label Alloy stamps on this unit's logs, so a check report and a
+    # Grafana panel can be joined.
+    assert payload["device"]
     assert len(payload["checks"]) == 3
     assert payload["checks"][0] == {"name": "deps", "status": OK, "detail": "detail"}
 
@@ -230,6 +233,71 @@ def test_disk_check_fails_below_the_floor(tmp_path, monkeypatch):
     monkeypatch.setattr(health, "MIN_FREE_BYTES", 1 << 62)
 
     assert health.check_disk().status == FAIL
+
+
+# ── identity and alloy ──────────────────────────────────────────────────
+
+
+def test_identity_check_warns_when_it_fell_back_to_the_hostname(monkeypatch):
+    """The fleet hazard this check exists for: a unit labelling itself with
+    the image's shared hostname, indistinguishable from 49 others in Loki."""
+    monkeypatch.setattr(health, "device_id", lambda: "dreamvu")
+    monkeypatch.setattr(health, "device_id_source", lambda: "hostname (no serial, no override)")
+
+    result = health.check_identity()
+
+    assert result.status == WARN
+    assert "not unique" in result.detail
+
+
+def test_identity_check_passes_on_a_serial(monkeypatch):
+    monkeypatch.setattr(health, "device_id", lambda: "pi-100000003d1f9d2a")
+    monkeypatch.setattr(health, "device_id_source", lambda: "/proc/cpuinfo serial")
+
+    result = health.check_identity()
+
+    assert result.status == OK
+    assert "pi-100000003d1f9d2a" in result.detail
+
+
+def test_alloy_check_warns_when_not_installed(monkeypatch):
+    """Never a FAIL — a unit with no log shipping still runs the kiosk."""
+    monkeypatch.setattr(health.shutil, "which", lambda name: None)
+
+    result = health.check_alloy()
+
+    assert result.status == WARN
+    assert "install-alloy.sh" in result.detail
+
+
+def test_alloy_check_warns_when_installed_but_unconfigured(monkeypatch, tmp_path):
+    monkeypatch.setattr(health.shutil, "which", lambda name: "/usr/bin/alloy")
+    monkeypatch.setattr(health, "ALLOY_CONFIG", tmp_path / "absent.alloy")
+
+    assert health.check_alloy().status == WARN
+
+
+def test_alloy_check_warns_when_configured_but_stopped(monkeypatch, tmp_path):
+    config = tmp_path / "config.alloy"
+    config.write_text("")
+    monkeypatch.setattr(health.shutil, "which", lambda name: "/usr/bin/alloy")
+    monkeypatch.setattr(health, "ALLOY_CONFIG", config)
+    monkeypatch.setattr(health, "_unit_active", lambda unit: False)
+
+    result = health.check_alloy()
+
+    assert result.status == WARN
+    assert "not running" in result.detail
+
+
+def test_alloy_check_passes_when_shipping(monkeypatch, tmp_path):
+    config = tmp_path / "config.alloy"
+    config.write_text("")
+    monkeypatch.setattr(health.shutil, "which", lambda name: "/usr/bin/alloy")
+    monkeypatch.setattr(health, "ALLOY_CONFIG", config)
+    monkeypatch.setattr(health, "_unit_active", lambda unit: True)
+
+    assert health.check_alloy().status == OK
 
 
 # ── run_checks: mode decides which checks apply ─────────────────────────

@@ -32,6 +32,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from wpu_client.device import device_id, device_id_source
 from wpu_client.paths import DATA_DIR, MODELS_DIR
 
 OK = "ok"
@@ -68,6 +69,8 @@ SCENE_DIRS = ("sau_single", "sau_duo", "fru_single", "fru_duo")
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
 
 LOG_DIR = Path("/var/log/wpu-client")
+ALLOY_UNIT = "alloy.service"
+ALLOY_CONFIG = Path("/etc/alloy/config.alloy")
 
 # Long enough to cross a congested Pi LAN, short enough that a checked fleet
 # of 50 units does not take an hour when the server is down.
@@ -338,6 +341,33 @@ def check_log_dir() -> Result:
     return Result("logs", OK, str(LOG_DIR))
 
 
+def check_identity() -> Result:
+    """Which unit this is, and how it worked that out.
+
+    The fleet is imaged from one card, so hostname is the same string on every
+    device. Falling back to it means this unit's logs are indistinguishable
+    from 49 others' — worth a warning here, where it is visible before the
+    logs are.
+    """
+    source = device_id_source()
+    detail = f"{device_id()} (from {source})"
+    if source.startswith("hostname"):
+        return Result("identity", WARN, f"{detail} — not unique across a cloned fleet")
+    return Result("identity", OK, detail)
+
+
+def check_alloy() -> Result:
+    """Log shipping. Optional by design — a unit with no Alloy runs the kiosk
+    perfectly well — so its absence is a WARN, never a FAIL."""
+    if shutil.which("alloy") is None:
+        return Result("alloy", WARN, "not installed — scripts/install-alloy.sh")
+    if not ALLOY_CONFIG.is_file():
+        return Result("alloy", WARN, f"installed, but {ALLOY_CONFIG} is missing")
+    if not _unit_active(ALLOY_UNIT):
+        return Result("alloy", WARN, f"{ALLOY_UNIT} not running — sudo systemctl start alloy")
+    return Result("alloy", OK, f"shipping journal, config {ALLOY_CONFIG}")
+
+
 def check_disk() -> Result:
     """Composed slides, the dataset writer and the log all need headroom."""
     try:
@@ -372,14 +402,14 @@ def run_checks(settings, diagnostic: bool, config_path: Path) -> list[Result]:
         results.append(check_gallery(settings))
     else:
         results.append(check_server(settings))
-    results += [check_camera(), check_log_dir(), check_disk()]
+    results += [check_camera(), check_identity(), check_log_dir(), check_alloy(), check_disk()]
     return results
 
 
 def render_text(results: list[Result], diagnostic: bool) -> str:
     """One aligned line per check, plus a verdict."""
     width = max(len(r.name) for r in results)
-    lines = [f"wpu-client pre-flight — {socket.gethostname()} — "
+    lines = [f"wpu-client pre-flight — {device_id()} — "
              f"{'diagnostic' if diagnostic else 'base'} mode", ""]
     for r in results:
         lines.append(f"  {r.name.ljust(width)}  {r.status.upper():<4}  {r.detail}")
@@ -400,6 +430,10 @@ def render_json(results: list[Result], diagnostic: bool) -> str:
     failed = [r.name for r in results if r.status == FAIL]
     return json.dumps(
         {
+            # `device` is the join key between this report and a Grafana
+            # panel: it is the same label Alloy stamps on the unit's logs.
+            # `host` is kept alongside it, and is the same on every unit.
+            "device": device_id(),
             "host": socket.gethostname(),
             "mode": "diagnostic" if diagnostic else "base",
             "status": FAIL if failed else OK,
