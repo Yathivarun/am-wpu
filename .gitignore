@@ -82,15 +82,38 @@ data/diagnostic_assets/
 !models/face_recognition_sface_2021dec.onnx
 !models/face_detection_yunet_2023mar.onnx
 
-# Diagnostic gallery: track ONLY the three seeded people; ignore any other seeds/local dumps
+# ── Art assets ──────────────────────────────────────────────────────────
+#
+# git carries the SMALLEST SET THAT BOOTS A WORKING KIOSK, not the whole
+# collection: one background per scene directory and three stock images. The
+# complete set is described by data/assets.manifest and pulled onto a device
+# with scripts/fetch_assets.sh — a fleet of 50 Pis wants its art from a
+# control node on the LAN, not from every clone of the repo.
+#
+# Why keep any at all: setup.sh aborts without the models, and `--check` FAILs
+# on an EMPTY scene directory. Keeping one background per directory means a
+# fresh clone, or a unit that cannot reach the asset host, still composes and
+# still displays — it just has less to choose from, which `--check` reports as
+# a warning against the config keys whose art has not arrived.
+#
+# Adding art: drop it in, run scripts/make_assets.sh to refresh the manifest,
+# and publish. Do not un-ignore it here unless it belongs in the boot set.
+data/base_scenes/*/*
+!data/base_scenes/*/scenes_config.json
+!data/base_scenes/sau_single/1.jpg
+!data/base_scenes/sau_duo/1.jpg
+!data/base_scenes/fru_single/1.jpg
+!data/base_scenes/fru_duo/1.png
+
+data/stock_images/*
+!data/stock_images/1.png
+!data/stock_images/2.png
+!data/stock_images/3.png
+
+# Diagnostic gallery and the people index: fetched, never tracked. Neither is
+# needed by a production unit — a base-mode kiosk matches against the server.
 data/embeddings/*
-!data/embeddings/varun/
-!data/embeddings/samvaran/
-!data/embeddings/kevin/
 data/people/*
-!data/people/Varun.png
-!data/people/Samvaran.png
-!data/people/Kevin.png
 
 # Written into the release zip by scripts/make_release.sh; never committed.
 wpu_client/VERSION
