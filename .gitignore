@@ -27,6 +27,7 @@ config/config.yaml
 # tracked doc; these go stale the moment the tree moves under them.
 CLEANUP_PLAN.md
 CODEBASE_SUMMARY.md
+OBSERVABILITY-ANSIBLE.md
 
 # Logs
 *.log
