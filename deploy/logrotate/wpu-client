@@ -1,0 +1,22 @@
+# Rotation for /var/log/wpu-client/app.log.
+#
+# Install to /etc/logrotate.d/wpu-client (scripts/setup.sh does this).
+#
+# The app writes this file for the benefit of anyone with a shell on the
+# device — `tail -f` during a callout. Fleet log shipping reads the journal
+# instead, which journald caps on its own; this file had no cap at all, and on
+# an SD card an unbounded log is a slow disk-full that takes the kiosk with it.
+#
+# copytruncate because the process holds the handle open for its whole life
+# and there is no reload path that would make it reopen: renaming the file
+# would leave it writing to an unlinked inode until the next restart.
+/var/log/wpu-client/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su root root
+}

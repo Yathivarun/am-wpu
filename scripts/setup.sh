@@ -47,6 +47,10 @@ fi
 echo "[3/9] Directories"
 mkdir -p data/embeddings data/people data/stock_images models config
 sudo mkdir -p /var/log/wpu-client && sudo chown "$RUN_USER" /var/log/wpu-client
+# app.log had no cap; on an SD card an unbounded log is a slow disk-full that
+# takes the kiosk down with it. Fleet log shipping reads the journal instead
+# (scripts/install-alloy.sh) — this file is for `tail -f` on the device.
+sudo install -m 644 deploy/logrotate/wpu-client /etc/logrotate.d/wpu-client
 
 echo "[4/9] Models (bundled in release — verify present)"
 # All three are required. mobilefacenet.onnx is the production recogniser — a

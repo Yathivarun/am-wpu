@@ -479,14 +479,23 @@ class FaceRecognitionService(ServiceBase):
             return None
 
     def _recognition_loop(self) -> None:
-        """Main recognition loop - runs in background thread."""
+        """Main recognition loop - runs in background thread.
+
+        Nothing on the per-frame path logs at INFO. The loop runs once every
+        `detection_interval` (1s) whether or not anyone is in front of the
+        camera, so an INFO line here is ~86k lines/day on one unit and millions
+        across a fleet whose logs are shipped to a single Loki. INFO is
+        reserved for transitions — a person arriving, being identified, timing
+        out, leaving — which are bounded by how many visitors there are. The
+        per-frame detail is all still there at DEBUG, one `log_level` away.
+        """
         logger.info("Face recognition loop started")
         loop_count = 0
 
         while self._running and not self._stop_event.is_set():
             try:
                 loop_count += 1
-                logger.info(f"[Loop #{loop_count}] Starting face detection cycle...")
+                logger.debug(f"[Loop #{loop_count}] Starting face detection cycle...")
                 self._capture_and_process()
                 self._check_person_timeout()
                 self._publish_overlay()
@@ -520,7 +529,7 @@ class FaceRecognitionService(ServiceBase):
             logger.warning(f"Failed to capture frame: {e}")
             return
 
-        logger.info(
+        logger.debug(
             f"Frame captured: {frame.shape[1]}x{frame.shape[0]} px, "
             f"dtype={frame.dtype}, range=[{frame.min():.1f}, {frame.max():.1f}]"
         )
@@ -546,7 +555,7 @@ class FaceRecognitionService(ServiceBase):
         yunet_user_ms = (cpu_after.user - cpu_before.user) * 1000
         yunet_system_ms = (cpu_after.system - cpu_before.system) * 1000
 
-        logger.info(
+        logger.debug(
             f"[YuNet] wall={yunet_wall_ms:.1f}ms | "
             f"cpu_user={yunet_user_ms:.1f}ms | "
             f"cpu_sys={yunet_system_ms:.1f}ms | "
@@ -574,18 +583,20 @@ class FaceRecognitionService(ServiceBase):
                 face_locations.append((int(y), int(x + fw), int(y + fh), int(x)))
 
         if not valid_faces:
-            logger.info(f"No faces detected (took {detection_time:.2f}s)")
+            logger.debug(f"No faces detected (took {detection_time:.2f}s)")
             if SAVE_DEBUG_FRAMES:
                 self._frames_since_last_save += 1
                 if self._frames_since_last_save >= self._save_every_n_frames:
                     if self._frame_save_counter < self._max_debug_frames:
                         self._save_debug_frame(rgb_frame, face_locations)
                     else:
-                        logger.info(f"Reached max debug frames ({self._max_debug_frames}), not saving more")
+                        logger.debug(
+                            f"Reached max debug frames ({self._max_debug_frames}), not saving more"
+                        )
                     self._frames_since_last_save = 0
             return
 
-        logger.info(f"Detected {len(valid_faces)} face(s) (took {detection_time:.2f}s)")
+        logger.debug(f"Detected {len(valid_faces)} face(s) (took {detection_time:.2f}s)")
 
         if SAVE_DEBUG_FRAMES and self._frame_save_counter < self._max_debug_frames:
             self._save_debug_frame(rgb_frame, face_locations)
@@ -609,7 +620,7 @@ class FaceRecognitionService(ServiceBase):
                 logger.debug(f"Skipping face too small: {face_width}x{face_height}")
                 continue
 
-            logger.info(f"Processing face at ({x},{y}), size: {face_width}x{face_height}")
+            logger.debug(f"Processing face at ({x},{y}), size: {face_width}x{face_height}")
 
             # ── Embedding: configured recogniser ──────────────────────────
             # Mirrors the matching server backend EXACTLY and feeds the raw
@@ -630,7 +641,7 @@ class FaceRecognitionService(ServiceBase):
             if self._process_face_vector(face_vector, bgr_frame, bbox_area):
                 processed_count += 1
 
-        logger.info(f"Identified {processed_count}/{len(order)} processed face(s) this frame")
+        logger.debug(f"Identified {processed_count}/{len(order)} processed face(s) this frame")
         self._update_display_selection()
 
     def _embed_face(self, bgr_frame: np.ndarray, yunet_row: np.ndarray) -> np.ndarray:
@@ -810,8 +821,8 @@ class FaceRecognitionService(ServiceBase):
                 f"{len(face_vector)}D vector, "
                 f"first 3: [{face_vector[0]:.4f}, {face_vector[1]:.4f}, {face_vector[2]:.4f}]"
             )
-            logger.info(f"Sending POST request to {self.config.api_endpoint}")
-            logger.info(
+            logger.debug(f"Sending POST request to {self.config.api_endpoint}")
+            logger.debug(
                 f"Request: type={request_data['type']}, n={request_data['n']}, "
                 f"vector={vector_preview}"
             )
@@ -820,7 +831,7 @@ class FaceRecognitionService(ServiceBase):
                 self.config.api_endpoint,
                 data=request_data,
             )
-            logger.info(f"Raw response body: {response_data}")
+            logger.debug(f"Raw response body: {response_data}")
 
             response = IdentifyResponse(**response_data)
 
@@ -1519,7 +1530,7 @@ class FaceRecognitionService(ServiceBase):
             frame: RGB frame from camera
             face_locations: List of (top, right, bottom, left) tuples
         """
-        logger.info(f"_save_debug_frame: frame={frame.shape}, faces={len(face_locations)}")
+        logger.debug(f"_save_debug_frame: frame={frame.shape}, faces={len(face_locations)}")
         self._frame_save_counter += 1
 
         try:
