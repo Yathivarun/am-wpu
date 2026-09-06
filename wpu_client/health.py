@@ -34,6 +34,7 @@ from urllib.parse import urlparse
 
 from wpu_client.device import device_id, device_id_source
 from wpu_client.paths import DATA_DIR, MODELS_DIR
+from wpu_client.version import version
 
 OK = "ok"
 WARN = "warn"
@@ -409,7 +410,7 @@ def run_checks(settings, diagnostic: bool, config_path: Path) -> list[Result]:
 def render_text(results: list[Result], diagnostic: bool) -> str:
     """One aligned line per check, plus a verdict."""
     width = max(len(r.name) for r in results)
-    lines = [f"wpu-client pre-flight — {device_id()} — "
+    lines = [f"wpu-client {version()} — pre-flight — {device_id()} — "
              f"{'diagnostic' if diagnostic else 'base'} mode", ""]
     for r in results:
         lines.append(f"  {r.name.ljust(width)}  {r.status.upper():<4}  {r.detail}")
@@ -435,6 +436,9 @@ def render_json(results: list[Result], diagnostic: bool) -> str:
             # `host` is kept alongside it, and is the same on every unit.
             "device": device_id(),
             "host": socket.gethostname(),
+            # Which build answered. 50 identical reports otherwise cannot
+            # distinguish "all up to date" from "half never got the update".
+            "version": version(),
             "mode": "diagnostic" if diagnostic else "base",
             "status": FAIL if failed else OK,
             "failed": failed,

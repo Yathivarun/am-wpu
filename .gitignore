@@ -91,3 +91,6 @@ data/people/*
 !data/people/Varun.png
 !data/people/Samvaran.png
 !data/people/Kevin.png
+
+# Written into the release zip by scripts/make_release.sh; never committed.
+wpu_client/VERSION
