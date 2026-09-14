@@ -6,7 +6,7 @@
 Description=WPU slideshow — server mode (online recognition + slideshow)
 After=network-online.target
 Wants=network-online.target
-Conflicts=slideshow-diagnostic.service
+Conflicts=slideshow-diagnostic.service slideshow-only.service
 
 [Service]
 Type=simple

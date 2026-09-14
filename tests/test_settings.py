@@ -16,7 +16,7 @@ def test_load_missing_file_falls_back_to_defaults_and_writes_one(tmp_path):
 
     assert settings.log_level == "INFO"
     assert settings.services.slideshow.enabled is True
-    assert settings.services.face_recognition.model == "sface"
+    assert settings.services.face_recognition.model == "mobilenet"
     # create_default_config runs as a side effect of a missing file.
     assert config_path.exists()
 
@@ -62,7 +62,22 @@ def test_create_default_config_is_valid_yaml(tmp_path):
     Settings.create_default_config(config_path)
 
     data = yaml.safe_load(config_path.read_text())
-    assert data["services"]["face_recognition"]["model"] == "sface"
+    assert data["services"]["face_recognition"]["model"] == "mobilenet"
+
+
+def test_create_default_config_round_trips_to_the_schema_defaults(tmp_path):
+    """The generated file must BE the defaults, not a hand-kept copy of them.
+
+    The literal this replaced had drifted to `sface` + localhost endpoints
+    while the schema defaults said mobilenet + the live cluster, so a device
+    that generated its own config came up unable to match anyone.
+    """
+    config_path = tmp_path / "config.yaml"
+    Settings.create_default_config(config_path)
+
+    written = Settings(**yaml.safe_load(config_path.read_text()))
+
+    assert written.model_dump() == Settings().model_dump()
 
 
 def test_get_service_config_returns_matching_section(tmp_path):
@@ -78,3 +93,75 @@ def test_slideshow_default_sort_mode_is_alphabetical():
     # directories (README changelog, 2026-07-11) — the safe default matters.
     settings = Settings()
     assert settings.services.slideshow.sort_mode == "alphabetical"
+
+
+def test_base_mode_composition_defaults():
+    """Base mode must be on by default, with the cutout names the server
+    actually uploads today (<registration_id>/wpu/<name>)."""
+    face = Settings().services.face_recognition
+
+    assert face.sau_cutout_filename == "sau_cutout.png"
+    assert face.fru_cutout_filename == "fru_cutout.png"
+    # Just the composited clip (video_urls[0]), not the raw captures behind it.
+    assert face.video_count == 1
+    # The rollback valve defaults off, i.e. local composition is the live path.
+    assert face.use_legacy_final_images is False
+    assert face.base_assets_max_bytes == 5 * 1024 * 1024 * 1024
+
+
+def test_endpoint_defaults_point_at_the_live_cluster():
+    """All three endpoints must default to the same host — a half-updated set
+    is how the video route ended up pointing at localhost while the rest of
+    the client talked to the cluster."""
+    face = Settings().services.face_recognition
+    hosts = {
+        face.api_endpoint.split("/")[2],
+        face.wpu_endpoint.split("/")[2],
+        face.sau_media_endpoint.split("/")[2],
+    }
+    assert hosts == {"192.168.1.19:8000"}
+    # Path param, not a query one: the id is appended as a path segment.
+    assert face.sau_media_endpoint.endswith("/api/v1/sau/media")
+
+
+def test_base_mode_fields_are_configurable(tmp_path):
+    """Cutout names and endpoints must be overridable from config.yaml."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "services": {
+                    "face_recognition": {
+                        "sau_cutout_filename": "body.png",
+                        "fru_cutout_filename": "face.png",
+                        "video_count": 3,
+                        "sau_media_endpoint": "http://server/v2/sau/media",
+                        "use_legacy_final_images": True,
+                        "base_assets_max_bytes": 1024,
+                    }
+                }
+            }
+        )
+    )
+
+    face = Settings.load(config_path).services.face_recognition
+    assert face.sau_cutout_filename == "body.png"
+    assert face.fru_cutout_filename == "face.png"
+    assert face.video_count == 3
+    assert face.sau_media_endpoint == "http://server/v2/sau/media"
+    assert face.use_legacy_final_images is True
+    assert face.base_assets_max_bytes == 1024
+
+
+def test_example_config_matches_the_settings_schema():
+    """config/config.yaml.example is the documented template — it must stay
+    loadable as-is, so a documented key can't drift from the model."""
+    with open("config/config.yaml.example") as f:
+        settings = Settings(**yaml.safe_load(f))
+
+    face = settings.services.face_recognition
+    assert face.sau_cutout_filename == "sau_cutout.png"
+    assert face.use_legacy_final_images is False
+    # The template provisions every new device (setup.sh step [5/8]), so it has
+    # to name the gallery registrations are actually enrolled into.
+    assert face.model == "mobilenet"

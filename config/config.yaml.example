@@ -27,20 +27,65 @@ services:
       - "*.mov"
       - "*.mp4"
     background_color: "black"
-    scale_mode: "fill"  # fill, fit, crop
+    # How each slide is mapped into the window — the ONLY setting that
+    # decides on-screen shape, applied to images and videos alike.
+    #   fill  stretch to the window, aspect ignored.  PRODUCTION 6:7 PANEL:
+    #         it advertises a 1920x1080 framebuffer and squeezes it into a 6:7
+    #         physical panel, and this stretch is what cancels that squeeze.
+    #   fit   letterbox, aspect preserved.  USE ON AN ORDINARY MONITOR — there
+    #         is no panel squeeze to cancel, so "fill" looks stretched.
+    #   crop  fill the window and crop the overflow, aspect preserved.
+    scale_mode: "fill"
     sort_mode: "alphabetical"  # numeric, alphabetical
 
   face_recognition:
     enabled: true
     camera_id: 0
     n: 4
-    # Recognition model: "sface" (OpenCV 128-D, light, default) or "mobilenet"
-    # (distilled MobileFaceNet 512-D → server's auraface gallery). v1: both are
-    # kept and this is a one-line switch while accuracy is still being tested.
-    model: "sface"
-    # Point these at your registration server.
-    api_endpoint: "http://localhost:8000/api/v1/identify/"
-    wpu_endpoint: "http://localhost:8000/api/v1/wpu/images"
+    # Recognition model. This picks BOTH the on-device embedder and the server
+    # gallery the identify request queries, and the two galleries are disjoint
+    # vector spaces — setting this wrong doesn't lower accuracy, it matches
+    # nobody at all.
+    #   mobilenet  MobileFaceNet 512-D → server's `auraface` gallery. Use this.
+    #              It is where registrations are actually enrolled.
+    #   sface      OpenCV SFace 128-D → server's `sface` gallery, which is
+    #              empty on the live cluster. Lighter on CPU; useful only for
+    #              the offline diagnostic gallery below.
+    model: "mobilenet"
+    # Point these at your registration server. Live cluster host = 192.168.1.19,
+    # API on :8000 — change the host in all three together.
+    api_endpoint: "http://192.168.1.19:8000/api/v1/identify/"
+    wpu_endpoint: "http://192.168.1.19:8000/api/v1/wpu/images"
+
+    # ── Base-mode local composition ───────────────────────────────────────
+    # In base (server-recognition) mode the Pi no longer downloads finished
+    # images. It fetches two raw alpha cutouts per person from wpu_endpoint —
+    # a body cutout (SAU) and a face cutout (FRU) — and composes them locally
+    # onto the backgrounds in data/base_scenes/, for both single-person and
+    # 2-person display. Composed output is cached under data/base_assets/.
+    #
+    # The server labels the two cutouts in its response; these names are only
+    # the fallback for picking them out of the older unlabelled signed_urls
+    # list. All asset fetching is best-effort: anything missing is simply
+    # skipped and never fails the display.
+    sau_cutout_filename: "sau_cutout.png"
+    fru_cutout_filename: "fru_cutout.png"
+
+    # SAU videos. This is the BASE of the media route — the registration id is
+    # appended as a path segment (/api/v1/sau/media/<registration_id>).
+    # Videos are picked by position, not by name (the server stores them under
+    # generated UUID keys): the capture station uploads the composited clip
+    # first, so video_count: 1 fetches exactly that one. Raise it to also show
+    # the raw captures behind it; 0 disables video fetching entirely.
+    sau_media_endpoint: "http://192.168.1.19:8000/api/v1/sau/media"
+    video_count: 1
+    # Rollback valve: set true to go back to displaying the server's
+    # pre-composed final images and skip local composition entirely.
+    use_legacy_final_images: false
+    # Disk budget for data/base_assets. Composed slides are regenerable, so
+    # once this is exceeded the least-recently-used entries are evicted —
+    # duo pairs first (they grow quadratically with visitor count).
+    base_assets_max_bytes: 5368709120  # 5 GB
     detection_interval: 1  # seconds between captures
     min_face_size: 100  # minimum face size in pixels
     display_result: true  # show result on screen overlay

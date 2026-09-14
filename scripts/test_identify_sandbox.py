@@ -140,7 +140,10 @@ def main():
     ap.add_argument("--base-url", default="http://192.168.1.11:28000",
                     help="Sandbox base URL (default: http://192.168.1.11:28000)")
     ap.add_argument("--n", type=int, default=4)
-    ap.add_argument("--model", default="sface", choices=sorted(EMBEDDERS))
+    # Defaults to the client's production model so a bare run reproduces what
+    # the kiosk actually sends. `--model sface` queries the 128-D gallery,
+    # which is empty on the live cluster and will match nobody.
+    ap.add_argument("--model", default="mobilenet", choices=sorted(EMBEDDERS))
     ap.add_argument("--min-face-size", type=int, default=100)
     ap.add_argument("--no-wpu", action="store_true", help="Skip the wpu/images fetch")
     args = ap.parse_args()

@@ -30,6 +30,36 @@ logger = logging.getLogger(__name__)
 # can't rely on `ended` firing in a timely way — see _on_video_duration_known().
 VIDEO_DISPLAY_SECONDS = 10
 
+# --- SCALE_MODE: production 6:7 panel vs an ordinary test monitor ---------
+# `slideshow.scale_mode` picks how a slide is mapped into the window, and it
+# is the ONLY thing that decides on-screen shape. Applied identically to
+# images and videos (SlideshowWindow._content_fit).
+#
+# The production display advertises a 1920x1080 framebuffer but is physically
+# a 6:7 panel, so the hardware squeezes everything horizontally. `fill`
+# non-uniformly stretches each slide to the window box, and that stretch is
+# exactly what the panel's squeeze cancels out — hence `fill` is the default
+# and reproduces the shipped behaviour bit for bit. On an ordinary 16:9
+# monitor nothing cancels it, which is why every slide looks stretched there;
+# `fit` letterboxes instead and is the setting for test hardware.
+#
+# Two things deliberately removed from the old path, both no-ops for shape:
+#
+#  * A `pixbuf.scale_simple(1920, 1080)` pre-stretch before FILL. FILL already
+#    maps any paintable onto the window box regardless of its intrinsic size,
+#    so pre-stretching changed nothing on screen — it only cost a full CPU
+#    resample of every slide and one extra generation of resampling loss. The
+#    old code said as much itself in _load_video's docstring.
+#  * A `portrait -> CONTAIN` override that ignored scale_mode for any
+#    taller-than-wide image. Under `fill` that would letterbox exactly the
+#    slides the 6:7 panel most needs stretched; under `fit` it was redundant,
+#    since CONTAIN letterboxes portrait content anyway.
+_SCALE_MODE_FITS = {
+    "fill": Gtk.ContentFit.FILL,
+    "fit": Gtk.ContentFit.CONTAIN,
+    "crop": Gtk.ContentFit.COVER,
+}
+
 # --- Why video was rendering blank ---------------------------------------
 # The previous implementation played video via Gtk.MediaFile, which (on the
 # GStreamer backend) paints frames onto its Gdk.Paintable using the
@@ -169,6 +199,51 @@ class _GstVideoPlayer:
         self.pipeline = None
 
 
+def visitor_image_source(
+    sketch_dir: Optional[str],
+    diagnostic_mode: bool,
+    use_legacy_final_images: bool,
+    unrecognized: bool = False,
+) -> str:
+    """Where a visitor's slides should come from: "local", "server" or "none".
+
+    Asset-driven rather than mode-driven: whenever locally-composed slides
+    exist for this person, they win. That covers diagnostic mode (sketch_dir
+    set on a gallery match) and base mode (sketch_dir populated by local
+    SAU/FRU composition).
+
+    Two rules override that:
+
+    * `use_legacy_final_images` is the rollback valve — it must force the
+      server path even when local slides exist, or flipping it would do
+      nothing.
+    * Diagnostic mode is OFFLINE by definition and must never reach for the
+      server, not even as a fallback. The common way to end up with no local
+      slides there is an unrecognized face, whose sketch_dir is always None;
+      falling through to the server would fire on every unknown visitor and
+      stall the calling (recognition) thread for timeout x max_retries with
+      nothing to show for it.
+    * An unrecognized face has no registration at all — it is tracked under a
+      generated "__unrecognized__<hex>" pseudo-id, which no endpoint can ever
+      resolve. Asking anyway is a guaranteed-failing round trip on the
+      recognition thread, and the server answers it with a 500 (the pseudo-id
+      isn't a UUID), so it also fills the server's logs with false alarms.
+      This applies in base mode too, not just diagnostic.
+    """
+    has_local = bool(sketch_dir) and os.path.isdir(sketch_dir)
+    if diagnostic_mode:
+        return "local" if has_local and not use_legacy_final_images else "none"
+    if unrecognized:
+        # Never the server: there is nothing there under a pseudo-id. Local
+        # slides are still honoured if something ever assigns them.
+        return "local" if has_local else "none"
+    if use_legacy_final_images:
+        return "server"
+    if has_local:
+        return "local"
+    return "server"
+
+
 def _video_suffixes(config) -> tuple[str, ...]:
     """Lowercase file extensions (e.g. '.mov') from config.video_extensions'
     glob patterns (e.g. '*.mov'), for extension-based video/image routing."""
@@ -201,7 +276,8 @@ class SlideshowService(ServiceBase):
     """
 
     def __init__(self, config: SlideshowConfig, event_bus: EventBus, wpu_endpoint: str,
-                 face_service=None, diagnostic_mode: bool = False):
+                 face_service=None, diagnostic_mode: bool = False,
+                 use_legacy_final_images: bool = False):
         """
         Initialize the slideshow service.
 
@@ -213,6 +289,11 @@ class SlideshowService(ServiceBase):
             diagnostic_mode: If True, show the matched person's own local sketches
                 (data/embeddings/<slug>/sketches/) on recognition instead of
                 fetching visitor images from the server.
+            use_legacy_final_images: Rollback valve. If True, always fetch the
+                server's pre-composed final images and ignore locally-composed
+                slides. Lives on the face_recognition config (it describes what
+                wpu_endpoint is expected to serve) and is passed in here, the
+                same way diagnostic_mode is.
         """
         super().__init__("slideshow")
         self.config = config
@@ -220,6 +301,7 @@ class SlideshowService(ServiceBase):
         self.wpu_endpoint = wpu_endpoint
         self.face_service = face_service  # used for bottom-left camera preview
         self.diagnostic_mode = diagnostic_mode
+        self.use_legacy_final_images = use_legacy_final_images
         self._app: Optional[SlideshowApp] = None
         self._overlay_text: Optional[str] = None
         self._overlay_hide_time: float = 0
@@ -376,8 +458,9 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         self.picture.set_vexpand(True)
         self.picture.set_hexpand(True)
 
-        # Set default to FILL for anamorphic stretching
-        self.picture.set_content_fit(Gtk.ContentFit.FILL)
+        # Per config.scale_mode — see the SCALE_MODE note at the top of this
+        # module. Set here too so the very first frame is already correct.
+        self.picture.set_content_fit(self._content_fit())
 
         # Create overlay label for face recognition results
         self.overlay_label = Gtk.Label()
@@ -491,26 +574,23 @@ class SlideshowWindow(Gtk.ApplicationWindow):
 
         logger.info(f"Updated image list: {len(new_images)} images, mode={mode}")
 
-    def _get_content_fit_for_pixbuf(self, pixbuf: GdkPixbuf.Pixbuf) -> Gtk.ContentFit:
-        """
-        Original logic kept intact but bypassed in load_image to support anamorphic scaling.
-        """
-        width = pixbuf.get_width()
-        height = pixbuf.get_height()
-        is_portrait = height > width
+    def _content_fit(self) -> Gtk.ContentFit:
+        """How a slide is mapped into the window, from `slideshow.scale_mode`.
 
-        if is_portrait:
-            return Gtk.ContentFit.CONTAIN
+        One rule for images and videos alike, with no per-image exceptions —
+        see the SCALE_MODE note at the top of this module for why the old
+        portrait special-case had to go.
 
-        scale_mode = self.config.scale_mode
-        if scale_mode == "fill":
-            return Gtk.ContentFit.FILL
-        elif scale_mode == "fit":
-            return Gtk.ContentFit.CONTAIN
-        elif scale_mode == "crop":
-            return Gtk.ContentFit.COVER
-        else:
-            return Gtk.ContentFit.FILL
+            fill  non-uniform stretch to the window box, aspect ignored.
+                  The production 6:7 panel's setting: it advertises a 1920x1080
+                  framebuffer and squeezes it into a 6:7 physical panel, and
+                  pre-stretching here cancels that squeeze out.
+            fit   letterbox, aspect preserved. Use on an ordinary monitor,
+                  where FILL's stretch has nothing cancelling it and every
+                  slide looks distorted.
+            crop  fill the window and crop the overflow, aspect preserved.
+        """
+        return _SCALE_MODE_FITS.get(self.config.scale_mode, Gtk.ContentFit.FILL)
 
     def _is_video_path(self, path: str) -> bool:
         """Whether `path` (local file or URL) is a video slide, per
@@ -551,15 +631,21 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         mode's signed_urls) has to land on disk first. Diagnostic mode's
         sketch_dir videos are already local and skip this entirely.
         """
+        content = self.service._http_client.download_binary(url)
+        if content is None:
+            logger.error(f"Failed to download video {url}")
+            return None
+        # Keep the source's real extension — GStreamer's decodebin sniffs the
+        # container itself, but a truthful suffix keeps the temp file readable
+        # in logs and lets any extension-based tooling behave sensibly.
+        suffix = os.path.splitext(urlparse(url).path)[1] or ".mov"
         try:
-            response = self.service._http_client._client.get(url)
-            response.raise_for_status()
-            fd, temp_path = tempfile.mkstemp(suffix=".mov")
+            fd, temp_path = tempfile.mkstemp(suffix=suffix)
             with os.fdopen(fd, "wb") as f:
-                f.write(response.content)
+                f.write(content)
             return temp_path
-        except Exception as e:
-            logger.error(f"Failed to download video {url}: {e}")
+        except OSError as e:
+            logger.error(f"Failed to write temp video file for {url}: {e}")
             return None
 
     def _load_static_image(self, image_path: str) -> None:
@@ -568,37 +654,32 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         if image_path.startswith("http://") or image_path.startswith("https://"):
             # Load from URL using httpx and GdkPixbuf
             logger.debug("Loading image from URL")
-            response = self.service._http_client._client.get(image_path)
-            response.raise_for_status()
+            content = self.service._http_client.download_binary(image_path)
+            if content is None:
+                raise RuntimeError(f"could not download image {image_path}")
 
             # Load image from bytes using GdkPixbuf
             loader = GdkPixbuf.PixbufLoader()
-            loader.write(response.content)
+            loader.write(content)
             loader.close()
             pixbuf = loader.get_pixbuf()
         else:
             # Load from local file into a pixbuf so we can inspect dimensions
             pixbuf = GdkPixbuf.Pixbuf.new_from_file(image_path)
 
-        # =================================================================
-        # ANAMORPHIC DISTORTION SCRIPT
-        # 1. Forcefully stretch the loaded pixbuf to 1920x1080 natively in GTK.
-        #    This ignores aspect ratio and pre-distorts the 6:7 image so the 
-        #    hardware display squishing it cancels it out perfectly.
-        # =================================================================
-        pixbuf = pixbuf.scale_simple(1920, 1080, GdkPixbuf.InterpType.BILINEAR)
-
-        # 2. Force FILL so GTK maps our newly stretched 1920x1080 image perfectly
-        #    1:1 to the 1080p window without adding any internal letterboxing.
-        self.picture.set_content_fit(Gtk.ContentFit.FILL)
-        # =================================================================
+        # The pixbuf is handed to GTK at its native size; scale_mode alone
+        # decides the on-screen shape. See the SCALE_MODE note at the top of
+        # this module, including why the old 1920x1080 pre-stretch was a
+        # no-op for shape and has been dropped.
+        fit = self._content_fit()
+        self.picture.set_content_fit(fit)
 
         texture = Gdk.Texture.new_for_pixbuf(pixbuf)
         self.picture.set_paintable(texture)
 
         orientation = "portrait" if pixbuf.get_height() > pixbuf.get_width() else "landscape"
         logger.debug(
-            f"Displaying ({orientation}, anamorphic stretch applied): "
+            f"Displaying ({orientation}, scale_mode={self.config.scale_mode}): "
             f"{os.path.basename(image_path) if not image_path.startswith('http') else 'visitor image'}"
         )
 
@@ -610,18 +691,12 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         _GstVideoPlayer pushes Gdk.MemoryTexture frames onto the SAME
         self.picture widget used for images — no separate video widget.
 
-        Anamorphic note: content_fit stays FILL, same as images. FILL always
-        non-uniformly stretches whatever paintable it's given to exactly fill
-        the widget's own box, ignoring the paintable's intrinsic aspect ratio
-        — that's the same distortion the image path gets from its explicit
-        pixbuf.scale_simple(1920, 1080, ...) pre-stretch (composing that
-        pre-stretch with a further FILL-to-window-box stretch is mathematically
-        identical to a single FILL-to-window-box stretch of the original
-        image; the intermediate 1920x1080 step doesn't change the final
-        on-screen shape). So video gets the same correction "for free" via
-        FILL — each frame is a plain Gdk.MemoryTexture at the video's native
-        resolution, and FILL stretches it into the window box exactly like it
-        does for the pre-stretched image texture.
+        Geometry note: video uses the same config-driven content fit as
+        images (_content_fit / the SCALE_MODE note at the top of this module),
+        so a slideshow mixing the two keeps one consistent shape. Nothing
+        video-specific is needed — each frame arrives as a plain
+        Gdk.MemoryTexture at the video's native resolution, and content_fit
+        maps it into the window box exactly as it does an image texture.
 
         Advance-on-completion: video plays to EOS and advances via
         _on_video_ended(), driven by the pipeline bus's EOS message — NOT a
@@ -639,8 +714,9 @@ class SlideshowWindow(Gtk.ApplicationWindow):
             local_path = video_path
             temp_path = None
 
-        # Same FILL behaviour as images, for a consistent look (see docstring).
-        self.picture.set_content_fit(Gtk.ContentFit.FILL)
+        # Same content fit as images, so a mixed image/video slideshow keeps
+        # one consistent geometry (see docstring).
+        self.picture.set_content_fit(self._content_fit())
 
         self._current_media_temp_path = temp_path
         self._video_advanced = False
@@ -887,32 +963,42 @@ class SlideshowApp(Gtk.Application):
         return image_files
 
     def _fetch_visitor_images(self, registration_id: str) -> list[str]:
-        """Fetch visitor WPU images from the API."""
-        try:
-            logger.info(f"Fetching WPU images for registration_id: {registration_id}")
-            response_data = self.http_client.get(
-                self.wpu_endpoint,
-                params={"registration_id": registration_id}
-            )
+        """Fetch visitor WPU images from the API.
 
-            # The API returns a dict with "signed_urls" key containing list of URLs
-            images = response_data.get("signed_urls", [])
-            logger.info(f"Fetched {len(images)} WPU images for visit {registration_id}")
-            return images
-
-        except Exception as e:
-            logger.error(f"Failed to fetch WPU images for visit {registration_id}: {e}")
+        Single attempt, never raises. This runs synchronously on the
+        recognition thread (the person.detected handler), so retrying a
+        failure would stall detection for timeout x max_retries while the
+        visitor is still standing there — and the overwhelmingly common
+        failure is a definitive one (no images for this registration) that
+        no amount of retrying will change.
+        """
+        logger.info(f"Fetching WPU images for registration_id: {registration_id}")
+        response_data = self.http_client.get_json_once(
+            self.wpu_endpoint, params={"registration_id": registration_id}
+        )
+        if not response_data:
+            logger.info(f"No WPU images available for visit {registration_id}")
             return []
 
-    def _load_person_sketches(self, sketch_dir: str) -> list[str]:
-        """Diagnostic mode: this person's own face-swap sketches.
+        # The API returns a dict with "signed_urls" key containing list of URLs
+        images = response_data.get("signed_urls", [])
+        logger.info(f"Fetched {len(images)} WPU images for visit {registration_id}")
+        return images
 
-        Reads <sketch_dir>/* (i.e. data/embeddings/<slug>/sketches/).
-        Returns [] if the folder is missing or empty — e.g. the person is seeded
-        but their face-swap render hasn't been dropped in yet.
+    def _load_person_sketches(self, sketch_dir: str) -> list[str]:
+        """This person's locally-available slides, images and videos together.
+
+        Reads a single flat <sketch_dir>/, whichever mode produced it:
+        diagnostic mode's seeded sketches (data/embeddings/<slug>/sketches/),
+        or base mode's locally-composed SAU/FRU scenes plus hardlinked videos
+        (data/base_assets/<registration_id>/display/, or the duo equivalent).
+        The body is mode-agnostic — it just globs a directory.
+
+        Returns [] if the folder is missing or empty — e.g. the person is
+        known but nothing has been composed or dropped in for them yet.
         """
         if not sketch_dir or not os.path.isdir(sketch_dir):
-            logger.warning(f"Diagnostic: no sketches folder for this person ({sketch_dir!r})")
+            logger.warning(f"No slides folder for this person ({sketch_dir!r})")
             return []
         files: list[str] = []
         for ext in self.config.image_extensions:
@@ -922,7 +1008,7 @@ class SlideshowApp(Gtk.Application):
         for ext in self.config.video_extensions:
             files.extend(glob.glob(os.path.join(sketch_dir, ext)))
         files.sort(key=lambda p: os.path.basename(p).lower())
-        logger.info(f"Diagnostic: loaded {len(files)} sketch(es)/video(s) from {sketch_dir}")
+        logger.info(f"Loaded {len(files)} local slide(s)/video(s) from {sketch_dir}")
         return files
 
     def switch_to_visitor_mode(self, registration_id: str, person_name: str,
@@ -937,12 +1023,24 @@ class SlideshowApp(Gtk.Application):
             f"(registration_id: {registration_id}, sketches: {sketch_dir})"
         )
 
-        # Diagnostic mode shows this person's own local sketches; normal mode
-        # fetches this visitor's generated images from the server.
-        if self.service.diagnostic_mode:
+        # See visitor_image_source() for the full policy, including why
+        # diagnostic mode must never fall through to the server.
+        source = visitor_image_source(
+            sketch_dir,
+            self.service.diagnostic_mode,
+            self.service.use_legacy_final_images,
+            unrecognized=unrecognized,
+        )
+        if source == "local":
             visitor_images = self._load_person_sketches(sketch_dir)
-        else:
+        elif source == "server":
             visitor_images = self._fetch_visitor_images(registration_id)
+        else:
+            logger.info(
+                f"No local slides for {person_name} and the server is not an "
+                f"option in this mode — staying on stock images"
+            )
+            visitor_images = []
 
         if not visitor_images:
             logger.warning(

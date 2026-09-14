@@ -1,0 +1,404 @@
+"""Base-mode asset fetching / caching tests.
+
+The behaviours worth pinning down here are the ones a kiosk depends on and
+that are easy to regress silently:
+
+  * a repeat visitor costs no downloads (cache hit),
+  * a re-photographed person IS re-downloaded even though the server keeps
+    the cutout at the same object key (ETag revalidation),
+  * an offline Pi keeps showing what it already has instead of losing it,
+  * the disk cache stays under its cap, evicting duo pairs before people.
+"""
+
+import json
+import os
+import time
+
+import pytest
+
+from wpu_client.services.face_recognition.asset_fetcher import (
+    _dir_size,
+    enforce_disk_budget,
+    fetch_person_assets,
+    link_videos_into,
+)
+
+RID = "reg-123"
+IMAGES_URL = "http://api/v1/wpu/images"
+MEDIA_URL = "http://api/v1/sau/media"
+OBJECT_BASE = f"http://minio/visits/{RID}"
+
+# The server stores videos under generated UUID keys — the capture station's
+# filename is gone, which is exactly why they're resolved by position.
+VIDEO_KEYS = [
+    f"{OBJECT_BASE}/sau/6f1c0a1e-0000-4000-8000-000000000001.mov",
+    f"{OBJECT_BASE}/sau/6f1c0a1e-0000-4000-8000-000000000002.mov",
+]
+
+
+class FakeHTTP:
+    """Minimal stand-in for HTTPClient covering the methods used."""
+
+    def __init__(self, etag='"v1"', videos=0, offline=False, labelled=True):
+        self.etag = etag
+        self.videos = videos
+        self.offline = offline
+        self.labelled = labelled
+        self.downloads = 0
+        self.heads = 0
+
+    def get_json_once(self, url, params=None, headers=None):
+        if self.offline:
+            return None
+        if "/sau/media" in url:
+            assert url.endswith(f"/{RID}"), "registration id belongs in the path"
+            if not self.videos:
+                return None  # 404 — registration has no SAU media
+            urls = VIDEO_KEYS[: self.videos]
+            return {
+                "image1_url": f"{OBJECT_BASE}/sau/img.jpg",
+                "image2_url": None,
+                "image3_url": None,
+                "video_url": urls[0],
+                "video_urls": urls,
+            }
+        assert params == {"registration_id": RID}
+        sau = f"{OBJECT_BASE}/wpu/sau_cutout.png"
+        fru = f"{OBJECT_BASE}/wpu/fru_cutout.png"
+        body = {
+            "signed_urls": [
+                sau,
+                fru,
+                # An unrelated object that must not match any configured name.
+                f"{OBJECT_BASE}/wpu/scene_1.png",
+            ]
+        }
+        if self.labelled:
+            body["sau_signed_url"] = sau
+            body["fru_signed_url"] = fru
+        return body
+
+    def head(self, url, headers=None):
+        self.heads += 1
+        return None if self.offline else {"ETag": self.etag}
+
+    def download_binary(self, url, headers=None):
+        if self.offline:
+            return None
+        self.downloads += 1
+        return b"BYTES-" + self.etag.encode()
+
+
+def _fetch(http, assets_dir, video_count=1):
+    return fetch_person_assets(
+        http, IMAGES_URL, MEDIA_URL, RID,
+        "sau_cutout.png", "fru_cutout.png", video_count, assets_dir,
+    )
+
+
+def test_first_fetch_downloads_both_cutouts(tmp_path):
+    http = FakeHTTP()
+    result = _fetch(http, tmp_path)
+
+    assert result["sau"].name == "sau.png"
+    assert result["fru"].name == "fru.png"
+    assert result["changed"] == {"sau", "fru"}
+    # scene_1.png matches no configured filename and must be ignored.
+    assert http.downloads == 2
+
+
+def test_repeat_visit_is_a_cache_hit(tmp_path):
+    http = FakeHTTP()
+    _fetch(http, tmp_path)
+    result = _fetch(http, tmp_path)
+
+    assert http.downloads == 2  # unchanged — nothing re-downloaded
+    assert result["changed"] == set()
+    assert result["sau"].exists() and result["fru"].exists()
+
+
+def test_changed_etag_forces_refetch(tmp_path):
+    """The server overwrites cutouts at the SAME object key when a person is
+    re-photographed, so the URL alone can never reveal the change."""
+    http = FakeHTTP()
+    _fetch(http, tmp_path)
+
+    http.etag = '"v2"'
+    result = _fetch(http, tmp_path)
+
+    assert result["changed"] == {"sau", "fru"}
+    assert http.downloads == 4
+    assert (tmp_path / "raw" / "sau.png").read_bytes() == b'BYTES-"v2"'
+
+
+def test_offline_keeps_previously_fetched_assets(tmp_path):
+    """A flaky network must not cost a visitor their already-cached slides."""
+    _fetch(FakeHTTP(), tmp_path)
+    result = _fetch(FakeHTTP(offline=True), tmp_path)
+
+    assert result["sau"] is not None
+    assert result["fru"] is not None
+    assert result["changed"] == set()
+
+
+def test_offline_new_person_degrades_to_nothing(tmp_path):
+    result = _fetch(FakeHTTP(offline=True), tmp_path)
+    assert result["sau"] is None
+    assert result["fru"] is None
+    assert result["videos"] == []
+
+
+def test_registration_without_video_is_not_an_error(tmp_path):
+    """A registration with no SAU media 404s — a normal outcome, not a fault."""
+    result = _fetch(FakeHTTP(videos=0), tmp_path)
+    assert result["videos"] == []
+    assert result["sau"] is not None  # cutouts still fetched fine
+
+
+def test_composited_video_fetched_by_position(tmp_path):
+    """Only video_urls[0] — the composited clip — with video_count=1, even
+    though the server offered two and neither URL carries a usable name."""
+    result = _fetch(FakeHTTP(videos=2), tmp_path, video_count=1)
+    assert [p.name for p in result["videos"]] == ["video_1.mov"]
+    assert result["videos"][0].read_bytes() == b'BYTES-"v1"'
+
+
+def test_video_count_takes_the_first_n(tmp_path):
+    result = _fetch(FakeHTTP(videos=2), tmp_path, video_count=3)
+    assert [p.name for p in result["videos"]] == ["video_1.mov", "video_2.mov"]
+
+
+def test_video_count_zero_skips_the_media_call(tmp_path):
+    class NoVideos(FakeHTTP):
+        def get_json_once(self, url, params=None, headers=None):
+            assert "/sau/media" not in url, "must not query media when disabled"
+            return super().get_json_once(url, params=params, headers=headers)
+
+    result = _fetch(NoVideos(videos=2), tmp_path, video_count=0)
+    assert result["videos"] == []
+
+
+def test_disabling_videos_discards_the_cached_ones(tmp_path):
+    """0 must mean off, not 'keep serving whatever is already on disk' — the
+    offline fallback that reuses cached videos must not resurrect them."""
+    _fetch(FakeHTTP(videos=1), tmp_path, video_count=1)
+    assert (tmp_path / "raw" / "video_1.mov").exists()
+
+    result = _fetch(FakeHTTP(videos=1), tmp_path, video_count=0)
+    assert result["videos"] == []
+    assert not (tmp_path / "raw" / "video_1.mov").exists()
+
+
+def test_legacy_scalar_video_url_still_works(tmp_path):
+    """A server predating the video_urls list returns only the scalar."""
+
+    class ScalarOnly(FakeHTTP):
+        def get_json_once(self, url, params=None, headers=None):
+            data = super().get_json_once(url, params=params, headers=headers)
+            if data and "video_url" in data:
+                data.pop("video_urls")
+            return data
+
+    result = _fetch(ScalarOnly(videos=2), tmp_path)
+    assert [p.name for p in result["videos"]] == ["video_1.mov"]
+
+
+def test_lowering_video_count_prunes_the_extras(tmp_path):
+    _fetch(FakeHTTP(videos=2), tmp_path, video_count=2)
+    assert (tmp_path / "raw" / "video_2.mov").exists()
+
+    result = _fetch(FakeHTTP(videos=2), tmp_path, video_count=1)
+    assert [p.name for p in result["videos"]] == ["video_1.mov"]
+    assert not (tmp_path / "raw" / "video_2.mov").exists()
+    assert "video_2" not in json.loads((tmp_path / "manifest.json").read_text())
+
+
+def test_offline_keeps_previously_fetched_video(tmp_path):
+    """The media listing failing must not drop a video already on disk."""
+    _fetch(FakeHTTP(videos=1), tmp_path)
+    result = _fetch(FakeHTTP(videos=1, offline=True), tmp_path)
+    assert [p.name for p in result["videos"]] == ["video_1.mov"]
+
+
+def test_cutouts_resolved_from_unlabelled_list(tmp_path):
+    """Fallback path: an older server returns signed_urls with no labels."""
+    http = FakeHTTP(labelled=False)
+    result = _fetch(http, tmp_path)
+    assert result["sau"].name == "sau.png"
+    assert result["fru"].name == "fru.png"
+    assert http.downloads == 2  # scene_1.png matched nothing
+
+
+def test_manifest_records_every_fetched_asset(tmp_path):
+    _fetch(FakeHTTP(videos=2), tmp_path, video_count=2)
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert sorted(manifest) == ["fru", "sau", "video_1", "video_2"]
+    assert manifest["sau"]["present"] is True
+    assert manifest["video_1"]["present"] is True
+
+
+def test_corrupt_manifest_is_survivable(tmp_path):
+    (tmp_path).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "manifest.json").write_text("{ not json")
+    result = _fetch(FakeHTTP(), tmp_path)
+    assert result["sau"] is not None
+
+
+def test_fetch_never_raises_on_a_broken_client(tmp_path):
+    """This runs on the recognition loop — it must not take the loop down."""
+
+    class Exploding:
+        def get_json_once(self, *a, **k):
+            raise RuntimeError("boom")
+
+        def head(self, *a, **k):
+            raise RuntimeError("boom")
+
+        def download_binary(self, *a, **k):
+            raise RuntimeError("boom")
+
+    result = _fetch(Exploding(), tmp_path)
+    assert result["sau"] is None and result["fru"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Videos into display/
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_link_videos_into_display(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    video = raw / "video_1.mov"
+    video.write_bytes(b"movie")
+
+    display = tmp_path / "display"
+    assert link_videos_into([video], display) == 1
+    assert (display / "video_1.mov").read_bytes() == b"movie"
+    # Hardlinked, not duplicated — same inode where the FS supports it.
+    assert (display / "video_1.mov").stat().st_ino == video.stat().st_ino
+
+
+def test_link_videos_is_idempotent(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    video = raw / "v.mov"
+    video.write_bytes(b"movie")
+    display = tmp_path / "display"
+
+    assert link_videos_into([video], display) == 1
+    assert link_videos_into([video], display) == 1
+    assert len(list(display.iterdir())) == 1
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Disk budget
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _entry(root, rel, kb, age_s):
+    path = root / rel
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "blob.bin").write_bytes(b"x" * (kb * 1024))
+    stamp = time.time() - age_s
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+def test_budget_noop_when_under_cap(tmp_path):
+    _entry(tmp_path, "alice", 100, 10)
+    assert enforce_disk_budget(tmp_path, 10 * 1024 * 1024) == 0
+    assert (tmp_path / "alice").exists()
+
+
+def test_budget_evicts_duo_pairs_before_people(tmp_path):
+    """Pairs grow quadratically with visitor count and rebuild cheaply from
+    the retained per-person cutouts, so they go first — even when they are
+    the most recently used entries."""
+    _entry(tmp_path, "alice", 500, 900)          # oldest person
+    _entry(tmp_path, "bob", 500, 100)
+    _entry(tmp_path, "duo/alice__bob", 500, 10)  # newest of all
+    _entry(tmp_path, "duo/alice__carl", 500, 5)
+
+    enforce_disk_budget(tmp_path, 1100 * 1024)
+
+    assert (tmp_path / "alice").exists()
+    assert (tmp_path / "bob").exists()
+    assert not (tmp_path / "duo" / "alice__bob").exists()
+    assert not (tmp_path / "duo" / "alice__carl").exists()
+    assert _dir_size(tmp_path) <= 1100 * 1024
+
+
+def test_budget_evicts_people_least_recently_used_first(tmp_path):
+    _entry(tmp_path, "old", 500, 9000)
+    _entry(tmp_path, "recent", 500, 5)
+
+    enforce_disk_budget(tmp_path, 600 * 1024)
+
+    assert not (tmp_path / "old").exists()
+    assert (tmp_path / "recent").exists()
+
+
+def test_budget_respects_protected_dirs(tmp_path):
+    """Whatever is on screen right now must never be deleted underneath it."""
+    old = _entry(tmp_path, "old", 500, 9000)
+    _entry(tmp_path, "recent", 500, 5)
+
+    enforce_disk_budget(tmp_path, 600 * 1024, protect={str(old)})
+
+    assert old.exists()
+    assert not (tmp_path / "recent").exists()
+
+
+def test_budget_protects_a_dir_named_by_its_display_subdir(tmp_path):
+    """Callers hold the display/ path (that's the sketch_dir the slideshow
+    was handed), but eviction works on the person dir that contains it.
+    Protection has to bridge that, or the visitor currently on screen gets
+    deleted out from under the slideshow."""
+    old = _entry(tmp_path, "old", 500, 9000)
+    _entry(tmp_path, "recent", 500, 5)
+
+    enforce_disk_budget(tmp_path, 600 * 1024, protect={str(old / "display")})
+
+    assert old.exists()
+    assert not (tmp_path / "recent").exists()
+
+
+def test_budget_protects_duo_pair_by_display_subdir(tmp_path):
+    """Same bridging for a duo pair, which is evicted ahead of people."""
+    pair = _entry(tmp_path, "duo/a__b", 500, 5)
+    _entry(tmp_path, "person", 500, 9000)
+
+    enforce_disk_budget(tmp_path, 600 * 1024, protect={str(pair / "display")})
+
+    assert pair.exists()
+    assert not (tmp_path / "person").exists()
+
+
+def test_dir_size_counts_hardlinks_once(tmp_path):
+    """Videos are hardlinked raw/ -> display/. Charging both names would
+    overstate usage and evict people earlier than the cap requires."""
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    video = raw / "v.mov"
+    video.write_bytes(b"x" * 100_000)
+
+    display = tmp_path / "display"
+    link_videos_into([video], display)
+
+    # Hardlink only if the filesystem actually gave us one.
+    if (display / "v.mov").stat().st_ino == video.stat().st_ino:
+        assert _dir_size(tmp_path) == 100_000
+    else:  # pragma: no cover - copy fallback filesystem
+        assert _dir_size(tmp_path) == 200_000
+
+
+@pytest.mark.parametrize("cap", [0, -1])
+def test_budget_disabled_when_cap_not_positive(tmp_path, cap):
+    _entry(tmp_path, "alice", 500, 10)
+    assert enforce_disk_budget(tmp_path, cap) == 0
+    assert (tmp_path / "alice").exists()
+
+
+def test_budget_on_missing_dir_is_noop(tmp_path):
+    assert enforce_disk_budget(tmp_path / "absent", 1024) == 0

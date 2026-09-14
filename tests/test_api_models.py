@@ -12,9 +12,11 @@ def test_from_vector_list_joins_floats_as_csv():
     assert request.face_vector == "0.1,0.2,0.3"
 
 
-def test_from_vector_list_defaults_to_sface():
+def test_from_vector_list_defaults_to_the_populated_gallery():
+    """An omitted `model` must not silently query the empty 128-D gallery."""
     request = IdentifyRequest.from_vector_list(type="face", n=1, face_vector=[1.0])
-    assert request.model == "sface"
+    assert request.model == "auraface"
+    assert IdentifyRequest(type="face", n=1, face_vector="1.0").model == "auraface"
 
 
 def test_identify_response_success_requires_a_name():

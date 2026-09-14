@@ -48,9 +48,17 @@ jobs:
       # the slideshow sort-key, whose gi import is stubbed in
       # tests/conftest.py), so CI installs just the portable subset of the
       # runtime deps rather than `pip install -e .` / `uv sync`.
+      # numpy and opencv are pinned to the same versions as pyproject.toml, so
+      # CI tests the stack that actually ships. The Pi's picamera2 is built
+      # against the NumPy 1.x C ABI; opencv 4.12+ declares `numpy>=2`, so
+      # leaving opencv free here makes the two unsatisfiable and pip either
+      # fails to resolve or quietly pulls NumPy 2.x back in. The headless
+      # build is the same upstream release, just without the GUI libs CI
+      # can't provide.
       - name: Install test dependencies
         run: |
           pip install pytest pytest-cov \
-            pyyaml pydantic numpy opencv-python-headless scipy httpx psutil
+            pyyaml pydantic 'numpy==1.26.4' 'opencv-python-headless==4.11.0.86' \
+            scipy httpx psutil
 
       - run: pytest --cov=wpu_client --cov-report=term-missing

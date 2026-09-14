@@ -3,9 +3,11 @@
 import csv
 import logging
 import os
+import shutil
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -18,8 +20,24 @@ from wpu_client.core.events import Event, EventBus
 from wpu_client.core.service_base import ServiceBase
 from wpu_client.models.api import IdentifyRequest, IdentifyResponse
 from wpu_client.paths import DATA_DIR, MODELS_DIR
+from wpu_client.services.face_recognition.asset_fetcher import (
+    DISPLAY_DIR_NAME,
+    FRU_LOCAL_NAME,
+    RAW_DIR_NAME,
+    SAU_LOCAL_NAME,
+    enforce_disk_budget,
+    fetch_person_assets,
+    link_videos_into,
+    touch,
+)
+from wpu_client.services.face_recognition.base_composer import (
+    compose_duo_body,
+    compose_duo_face,
+    compose_single_body,
+    compose_single_face,
+)
 from wpu_client.services.face_recognition.diagnostic_gallery import DiagnosticGallery
-from wpu_client.services.face_recognition.duo_composer import compose_duo, pick_alpha_image
+from wpu_client.services.face_recognition.local_assets import resolve_local_cutouts
 from wpu_client.utils.http import HTTPClient
 
 logger = logging.getLogger(__name__)
@@ -28,15 +46,34 @@ DATASET_DIR = str(DATA_DIR / "dataset")
 DATASET_MAX_BYTES = 30 * 1024 * 1024 * 1024  # 30 GB hard cap
 DATASET_MAX_FRAMES_PER_VISIT = 50             # max frames saved per visit
 
-# ── Duo scene composition (diagnostic mode only) ────────────────────────────
-# When exactly two known people are tracked together, their alpha-cutout
-# faces (data/embeddings/<slug>/sketches/images/) are composed onto every
-# matching scene under DUO_SCENES_DIR, using DUO_SCENES_CONFIG for placement.
-# Output is cached under DUO_OUTPUT_DIR/<slug_a>__<slug_b>/ and reused for as
-# long as that exact pair stays in frame (and across restarts, on disk).
-DUO_SCENES_DIR = DATA_DIR / "duo_scenes"
-DUO_SCENES_CONFIG_PATH = DUO_SCENES_DIR / "scenes_config.json"
-DUO_OUTPUT_DIR = DATA_DIR / "duo_output"
+# ── Local composition (both modes) ──────────────────────────────────────────
+# Every visitor's slides are composed ON THE PI from two raw alpha cutouts —
+# SAU (body) and FRU (face) — pasted onto the backgrounds under
+# BASE_SCENES_DIR. The two modes differ only in where those cutouts come from:
+#
+#   base mode        downloaded from the server, cached under
+#                    BASE_ASSETS_DIR/<registration_id>/raw/
+#   diagnostic mode  read straight out of the seeded gallery folder
+#                    data/embeddings/<slug>/sketches/ (see local_assets.py)
+#
+# Composed output is cached per person under <assets root>/<id>/display/ and
+# per pair under <assets root>/duo/<id_a>__<id_b>/display/. The two modes get
+# separate roots so an offline test run never evicts or is mistaken for real
+# visitor data.
+BASE_ASSETS_DIR = DATA_DIR / "base_assets"
+BASE_DUO_ASSETS_DIR = BASE_ASSETS_DIR / "duo"
+DIAGNOSTIC_ASSETS_DIR = DATA_DIR / "diagnostic_assets"
+DIAGNOSTIC_DUO_ASSETS_DIR = DIAGNOSTIC_ASSETS_DIR / "duo"
+BASE_SCENES_DIR = DATA_DIR / "base_scenes"
+
+SAU_SINGLE_DIR = BASE_SCENES_DIR / "sau_single"
+SAU_SINGLE_CONFIG_PATH = SAU_SINGLE_DIR / "scenes_config.json"
+FRU_SINGLE_DIR = BASE_SCENES_DIR / "fru_single"
+FRU_SINGLE_CONFIG_PATH = FRU_SINGLE_DIR / "scenes_config.json"
+SAU_DUO_DIR = BASE_SCENES_DIR / "sau_duo"
+SAU_DUO_CONFIG_PATH = SAU_DUO_DIR / "scenes_config.json"
+FRU_DUO_DIR = BASE_SCENES_DIR / "fru_duo"
+FRU_DUO_CONFIG_PATH = FRU_DUO_DIR / "scenes_config.json"
 
 # Enable debug frame saving by setting environment variable: SAVE_DEBUG_FRAMES=1
 SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "0") == "1"
@@ -68,6 +105,11 @@ _ARCFACE_REF_LANDMARKS = np.array(
 # config `model` value → server gallery id sent in the identify request.
 _SERVER_MODEL_ID = {"sface": "sface", "mobilenet": "auraface"}
 
+# Used when `model` is absent or unrecognised. Must stay the gallery the server
+# actually enrols into, or an unnoticed typo in config.yaml silently downgrades
+# a device to querying an empty collection and it recognises nobody.
+DEFAULT_MODEL = "mobilenet"
+
 # Maximum number of faces processed per captured frame (largest-first). Caps
 # per-frame CPU cost when a crowd is in view; raise/lower freely.
 MAX_FACES_PER_FRAME = 2
@@ -94,6 +136,19 @@ CAMERA_LORES_SIZE = (320, 240)       # live preview — full FOV, cheap to pull
 CAMERA_LORES_FORMAT = "YUV420"
 
 
+def _has_content(path: Path) -> bool:
+    """Whether `path` is a directory with at least one file in it.
+
+    Used to confirm a cached sketch_dir still exists before handing it out:
+    the base-asset disk cap can evict a directory that an in-memory cache
+    still points at.
+    """
+    try:
+        return path.is_dir() and any(path.iterdir())
+    except OSError:
+        return False
+
+
 class FaceRecognitionService(ServiceBase):
     """
     Face recognition service that continuously captures images,
@@ -112,12 +167,17 @@ class FaceRecognitionService(ServiceBase):
     frame; only that one method needs editing if a real selection
     requirement (round-robin, random, closest-face, ...) is defined later.
 
-    Embeddings are generated locally on the Pi using YuNet (detection) +
-    SFace-128D (recognition, OpenCV). The pipeline mirrors the registration
-    server's SFaceBackend exactly (alignCrop + feature + L2-normalise) so the
-    128-D probe vectors are directly comparable to the gallery vectors stored
-    in the `face_vectors_sface` Qdrant collection. The embedding is sent to the
-    server API only for identity lookup; recognition itself happens on the Pi.
+    Embeddings are generated locally on the Pi: YuNet detects and locates the
+    face, then the configured embedder turns it into a vector. Each embedder
+    mirrors its server-side counterpart exactly, so the probe vectors are
+    directly comparable to the stored gallery vectors:
+
+      mobilenet (default) → ArcFace 5-point align → 112x112 → (x-127.5)/128 →
+                            MobileFaceNet → L2 → `face_vectors_auraface`
+      sface               → alignCrop + feature + L2 → `face_vectors_sface`
+
+    Only the embedding is sent to the server, and only for identity lookup;
+    detection and embedding both happen on-device.
 
     Each visible face is first checked against the cached vectors of every
     currently-tracked person (cheap, local cosine match); only faces that
@@ -165,9 +225,15 @@ class FaceRecognitionService(ServiceBase):
 
         # Duo composition cache: frozenset({slug_a, slug_b}) -> sketch_dir
         # (the folder of composed scene images). Built once per pair, reused
-        # for as long as that exact pair stays tracked together. Diagnostic
-        # mode only.
+        # for as long as that exact pair stays tracked together. Both modes
+        # take the same path; only the cutout source underneath differs.
         self._duo_cache: dict[frozenset, str] = {}
+
+        # Single-person composition cache:
+        # registration_id -> display/ dir of composed slides. Mirrors
+        # _duo_cache; the on-disk display/ dir is the second-level cache
+        # that survives restarts.
+        self._single_cache: dict[str, str] = {}
 
         # Similarity threshold for local matching (lower = more strict)
         # Cosine distance: 0 = identical, 1 = completely different
@@ -191,15 +257,19 @@ class FaceRecognitionService(ServiceBase):
             )
             logger.info(f"Debug frames will be saved to {DEBUG_FRAME_DIR}")
 
-        # Recognition model selection (config.yaml: "sface" | "mobilenet").
-        # "sface"     → OpenCV SFace 128-D (light, default).
-        # "mobilenet" → distilled MobileFaceNet 512-D (matches server auraface).
-        self._model_name: str = str(getattr(config, "model", "sface")).lower()
+        # Recognition model selection (config.yaml: "mobilenet" | "sface").
+        # "mobilenet" → distilled MobileFaceNet 512-D → server's `auraface`
+        #               gallery. The default, and the only gallery the live
+        #               cluster actually enrols registrations into.
+        # "sface"     → OpenCV SFace 128-D → server's `sface` gallery. Lighter,
+        #               but that gallery is empty upstream; diagnostic use only.
+        self._model_name: str = str(getattr(config, "model", DEFAULT_MODEL)).lower()
         if self._model_name not in _SERVER_MODEL_ID:
             logger.warning(
-                f"Unknown recognition model '{self._model_name}' — falling back to 'sface'"
+                f"Unknown recognition model '{self._model_name}' — "
+                f"falling back to '{DEFAULT_MODEL}'"
             )
-            self._model_name = "sface"
+            self._model_name = DEFAULT_MODEL
         self._server_model_id: str = _SERVER_MODEL_ID[self._model_name]
 
         # Models (initialised in start())
@@ -211,6 +281,16 @@ class FaceRecognitionService(ServiceBase):
         # Diagnostic (offline) mode — local gallery instead of server /identify
         self._diagnostic_mode: bool = getattr(config, "diagnostic_mode", False)
         self._gallery: Optional[DiagnosticGallery] = None
+
+        # Where composed slides are cached. Separate roots per mode so a
+        # diagnostic run never evicts real visitor assets under its disk cap,
+        # and a gallery slug can never collide with a server registration id.
+        if self._diagnostic_mode:
+            self._assets_root = DIAGNOSTIC_ASSETS_DIR
+            self._duo_assets_root = DIAGNOSTIC_DUO_ASSETS_DIR
+        else:
+            self._assets_root = BASE_ASSETS_DIR
+            self._duo_assets_root = BASE_DUO_ASSETS_DIR
 
     def start(self) -> None:
         """Start the face recognition service."""
@@ -662,8 +742,9 @@ class FaceRecognitionService(ServiceBase):
     ) -> bool:
         """Diagnostic mode: identify one face against the local seeded gallery
         (no server). On a match, starts tracking that person under their own
-        registration_id (the gallery slug), carrying their sketch_dir so the
-        slideshow can show that person's own sketches."""
+        registration_id (the gallery slug), carrying the display dir composed
+        from their local cutouts — the same slides base mode would build, just
+        from a gallery folder instead of a download."""
         if not self._gallery or len(self._gallery) == 0:
             logger.info("Diagnostic gallery empty — no local match possible")
             self._handle_unrecognized(face_vector, bbox_area)
@@ -683,16 +764,22 @@ class FaceRecognitionService(ServiceBase):
         confidence = (1.0 - match.distance) * 100
         logger.info(
             f"Local match: {match.entry.name} "
-            f"dist={match.distance:.4f} conf={confidence:.1f}% sketches={match.entry.sketch_dir}"
+            f"dist={match.distance:.4f} conf={confidence:.1f}% cutouts={match.entry.sketch_dir}"
         )
+        # Same call the server path makes — composes this person's slides from
+        # their SAU/FRU cutouts onto data/base_scenes/, so sketch_dir is
+        # already populated on the tracked entry for the duo path and the
+        # single-person fallback alike.
+        sketch_dir = self._ensure_single_assets(match.entry.slug, match.entry.gender)
         entry = self._track_new_face(
             registration_id=match.entry.slug,
             face_vector=face_vector,
             person_name=match.entry.name,
             confidence=confidence,
             distance=match.distance,
-            sketch_dir=match.entry.sketch_dir,
+            sketch_dir=sketch_dir,
             bbox_area=bbox_area,
+            gender=match.entry.gender,
         )
         self._save_dataset_frame_for(entry, frame, distance=match.distance)
         return True
@@ -751,13 +838,27 @@ class FaceRecognitionService(ServiceBase):
                 self._handle_unrecognized(face_vector, bbox_area)
                 return True
 
+            # Scene configs key gender in lowercase ("male"/"female"), same
+            # normalisation the diagnostic gallery applies to its own
+            # metadata. A server that doesn't return gender yet leaves this
+            # None, which never excludes a scene.
+            gender = response.gender.lower() if response.gender else None
+
+            # Fetch this person's cutouts and compose their slides now, so
+            # sketch_dir is already populated on the tracked entry — the duo
+            # path and the single-person fallback both read it from there
+            # rather than recomposing.
+            sketch_dir = self._ensure_single_assets(response.registration_id, gender)
+
             entry = self._track_new_face(
                 registration_id=response.registration_id,
                 face_vector=face_vector,
                 person_name=response.person_name,
                 confidence=confidence,
                 distance=response.distance or 0.0,
+                sketch_dir=sketch_dir,
                 bbox_area=bbox_area,
+                gender=gender,
             )
             self._save_dataset_frame_for(entry, frame, distance=response.distance or 0.0)
 
@@ -801,6 +902,7 @@ class FaceRecognitionService(ServiceBase):
         sketch_dir: Optional[str] = None,
         bbox_area: float = 0.0,
         unrecognized: bool = False,
+        gender: Optional[str] = None,
     ) -> dict:
         """Start tracking a newly-identified face under its own registration_id."""
         with self._person_lock:
@@ -811,6 +913,9 @@ class FaceRecognitionService(ServiceBase):
                 "confidence": confidence,
                 "distance": distance,
                 "sketch_dir": sketch_dir,
+                # Carried so duo composition can gender-filter scenes later
+                # without re-querying the server.
+                "gender": gender,
                 "unrecognized": unrecognized,
                 # Flips to True the first time the overlay shows this
                 # person — that first line is a one-time "Welcome!", every
@@ -823,6 +928,213 @@ class FaceRecognitionService(ServiceBase):
             }
             self._tracked_faces[registration_id] = entry
             return entry
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Local composition (both modes)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _assets_dir(self, registration_id: str) -> Path:
+        """Per-person asset root under whichever mode's cache is active."""
+        return self._assets_root / registration_id
+
+    def _enforce_asset_budget(self, protect: Optional[set] = None) -> None:
+        """Trim the active asset cache back under its configured size cap."""
+        enforce_disk_budget(
+            self._assets_root,
+            getattr(self.config, "base_assets_max_bytes", 0),
+            protect=protect,
+        )
+
+    def _cutouts_for(self, registration_id: str) -> dict:
+        """This person's raw SAU/FRU cutouts, wherever this mode keeps them.
+
+        Base mode reads the copies asset_fetcher downloaded into raw/;
+        diagnostic mode resolves them out of the seeded gallery folder. Both
+        return {"sau": Path | None, "fru": Path | None}, so everything
+        downstream is mode-agnostic.
+
+        Deliberately re-derived from disk rather than remembered from the
+        fetch: a warm on-disk cache lets the single-person path return early
+        without fetching anything, and the duo path still has to find the
+        cutouts after a restart.
+        """
+        if self._diagnostic_mode:
+            entry = self._gallery.get_entry(registration_id) if self._gallery else None
+            if entry is None:
+                return {"sau": None, "fru": None}
+            return resolve_local_cutouts(entry.sketch_dir, entry.meta)
+
+        raw_dir = self._assets_dir(registration_id) / RAW_DIR_NAME
+        cutouts = {}
+        for key, name in (("sau", SAU_LOCAL_NAME), ("fru", FRU_LOCAL_NAME)):
+            path = raw_dir / name
+            cutouts[key] = path if path.exists() else None
+        return cutouts
+
+    def _cutouts_are_newer_than(self, cutouts: dict, display_dir: Path) -> bool:
+        """Whether a cutout has been replaced since the slides were composed.
+
+        Diagnostic mode's equivalent of base mode's ETag revalidation. The
+        gallery folder is hand-edited — swapping in a better `person.png` is
+        the normal way to iterate — and without this the stale composed slides
+        would be served forever from the on-disk cache.
+        """
+        try:
+            composed = [p.stat().st_mtime for p in display_dir.iterdir() if p.is_file()]
+            if not composed:
+                return False
+            sources = [
+                Path(path).stat().st_mtime
+                for path in (cutouts.get("sau"), cutouts.get("fru")) if path
+            ]
+            return bool(sources) and max(sources) > min(composed)
+        except OSError:
+            return False
+
+    def _ensure_single_assets(
+        self, registration_id: str, gender: Optional[str]
+    ) -> Optional[str]:
+        """Obtain + compose this person's own slides, returning their display dir.
+
+        Two cache layers before any work happens: an in-memory dict (mirrors
+        _duo_cache) and the on-disk display/ dir, which survives restarts. A
+        repeat visitor therefore costs nothing beyond a cheap revalidation;
+        only a brand-new visitor pays the fetch+compose latency, on this
+        (recognition-loop) thread.
+
+        Returns None when nothing composable came back, in which case the
+        caller simply has no sketch_dir and the slideshow falls back.
+        """
+        if not registration_id:
+            return None
+
+        cached = self._single_cache.get(registration_id)
+        if cached:
+            # The cap can evict a dir that's still in this cache, so a hit is
+            # only trusted while the files are actually there — otherwise fall
+            # through and rebuild rather than hand out a dangling path.
+            if _has_content(Path(cached)):
+                touch(Path(cached).parent)
+                return cached
+            logger.info(f"Cached slides for {registration_id} were evicted — rebuilding")
+            self._single_cache.pop(registration_id, None)
+
+        assets_dir = self._assets_dir(registration_id)
+        display_dir = assets_dir / DISPLAY_DIR_NAME
+
+        try:
+            if self._diagnostic_mode:
+                cutouts = self._cutouts_for(registration_id)
+                videos: list[Path] = []
+                stale = self._cutouts_are_newer_than(cutouts, display_dir)
+            else:
+                assets = fetch_person_assets(
+                    self._http_client,
+                    self.config.wpu_endpoint,
+                    getattr(self.config, "sau_media_endpoint", ""),
+                    registration_id,
+                    getattr(self.config, "sau_cutout_filename", "sau_cutout.png"),
+                    getattr(self.config, "fru_cutout_filename", "fru_cutout.png"),
+                    int(getattr(self.config, "video_count", 1) or 0),
+                    assets_dir,
+                )
+                cutouts = {"sau": assets["sau"], "fru": assets["fru"]}
+                videos = assets["videos"]
+                stale = bool(assets["changed"])
+
+            # A cutout that changed underneath us invalidates everything
+            # composed from the old one — including every duo pair this
+            # person appears in.
+            if stale and display_dir.is_dir():
+                logger.info(
+                    f"Cutouts changed for {registration_id} — discarding stale composed slides"
+                )
+                shutil.rmtree(display_dir, ignore_errors=True)
+                self._invalidate_duo_caches_for(registration_id)
+
+            compose_single_body(
+                cutouts["sau"], SAU_SINGLE_DIR, SAU_SINGLE_CONFIG_PATH, display_dir,
+            )
+            compose_single_face(
+                self._yunet_detector, cutouts["fru"], gender,
+                FRU_SINGLE_DIR, FRU_SINGLE_CONFIG_PATH, display_dir,
+            )
+            link_videos_into(videos, display_dir)
+        except Exception as e:
+            logger.error(
+                f"Asset preparation failed for {registration_id}: {e}", exc_info=True
+            )
+
+        # Whatever ended up in display/ — composed slides, videos, or both —
+        # is what the slideshow will show. Nothing there means nothing to show.
+        if not _has_content(display_dir):
+            logger.info(f"No composed slides available for {registration_id}")
+            return None
+
+        sketch_dir = str(display_dir)
+        self._single_cache[registration_id] = sketch_dir
+        touch(assets_dir)
+        # Pin this person's whole asset dir, not just display/ — eviction
+        # operates on the person dir, and deleting it would pull the slides
+        # out from under the slideshow that is about to show them.
+        self._enforce_asset_budget(protect={str(assets_dir)})
+        return sketch_dir
+
+    def _invalidate_duo_caches_for(self, registration_id: str) -> None:
+        """Drop every cached duo pairing involving this person.
+
+        Called when their cutouts change, since each composed pair scene
+        embeds the old copy.
+        """
+        stale = [key for key in self._duo_cache if registration_id in key]
+        for key in stale:
+            self._duo_cache.pop(key, None)
+        for pair_dir in (self._duo_assets_root.glob(f"*{registration_id}*")
+                         if self._duo_assets_root.is_dir() else []):
+            shutil.rmtree(pair_dir, ignore_errors=True)
+        if stale:
+            logger.info(f"Invalidated {len(stale)} cached duo pairing(s) for {registration_id}")
+
+    def _build_duo_sketch_dir(
+        self, entry_a: dict, entry_b: dict, id_a: str, id_b: str
+    ) -> Optional[str]:
+        """Compose a duo display dir for this pair, in either mode.
+
+        Reuses the cutouts already located when each person was first
+        identified — nothing is refetched here. Videos are single-person
+        only, so none are linked in.
+        """
+        cutouts_a = self._cutouts_for(id_a)
+        cutouts_b = self._cutouts_for(id_b)
+
+        output_dir = self._duo_assets_root / f"{id_a}__{id_b}" / DISPLAY_DIR_NAME
+
+        if cutouts_a["sau"] and cutouts_b["sau"]:
+            compose_duo_body(
+                cutouts_a["sau"], cutouts_b["sau"],
+                SAU_DUO_DIR, SAU_DUO_CONFIG_PATH, output_dir,
+            )
+        if cutouts_a["fru"] and cutouts_b["fru"]:
+            compose_duo_face(
+                self._yunet_detector, cutouts_a["fru"], cutouts_b["fru"],
+                entry_a.get("gender"), entry_b.get("gender"),
+                FRU_DUO_DIR, FRU_DUO_CONFIG_PATH, output_dir,
+            )
+
+        if not _has_content(output_dir):
+            return None
+
+        sketch_dir = str(output_dir)
+        touch(output_dir.parent)
+        # Pin the pair dir itself, plus both people's dirs — the pair was
+        # composed from their cutouts and would have to rebuild if evicted
+        # while still on screen.
+        self._enforce_asset_budget(protect={
+            str(output_dir.parent),
+            str(self._assets_dir(id_a)),
+            str(self._assets_dir(id_b)),
+        })
+        return sketch_dir
 
     # ─────────────────────────────────────────────────────────────────────
     # Per-frame wrap-up: overlay (all faces) + display selection (one face)
@@ -914,11 +1226,10 @@ class FaceRecognitionService(ServiceBase):
             recognized_ids = [
                 rid for rid, e in self._tracked_faces.items() if not e["unrecognized"]
             ]
-            duo_mode = (
-                self._diagnostic_mode
-                and len(self._tracked_faces) == 2
-                and len(recognized_ids) == 2
-            )
+            # Duo display works in both modes off the same code path —
+            # only the cutout source differs, and that is resolved inside
+            # _cutouts_for, not in this gate.
+            duo_mode = len(self._tracked_faces) == 2 and len(recognized_ids) == 2
 
             if duo_mode:
                 id_a, id_b = sorted(recognized_ids)
@@ -969,14 +1280,29 @@ class FaceRecognitionService(ServiceBase):
                     sketch_dir=sketch_dir, unrecognized=False,
                 )
                 return
-            # Composition unavailable (missing alpha images/scenes/eyes) —
-            # fall back to the normal single biggest-face display instead.
+            # Composition unavailable (missing cutouts/alpha images/scenes/
+            # eyes) — fall back to showing ONE of the pair. Prefer whichever
+            # of the two actually has usable slides already on their tracked
+            # entry, so "one person has assets and the other doesn't" shows
+            # the one who does, deterministically rather than by accident of
+            # which face happens to be bigger. Both single-person composes
+            # already ran at track time, so this costs nothing.
             logger.warning(
                 "Duo composition unavailable for this pair — falling back to "
                 "single-face display"
             )
             with self._person_lock:
-                fallback_id = self._select_person_for_display(self._tracked_faces)
+                fallback_id = None
+                for rid, entry in sorted(
+                    [(id_a, entry_a), (id_b, entry_b)],
+                    key=lambda t: t[1].get("bbox_area", 0),
+                    reverse=True,
+                ):
+                    if entry.get("sketch_dir"):
+                        fallback_id = rid
+                        break
+                if fallback_id is None:
+                    fallback_id = self._select_person_for_display(self._tracked_faces)
                 self._displayed_registration_id = fallback_id
                 fb_entry = self._tracked_faces.get(fallback_id) if fallback_id else None
                 self._displayed_meta = dict(fb_entry) if fb_entry else None
@@ -999,38 +1325,22 @@ class FaceRecognitionService(ServiceBase):
         self, pair_key: frozenset, entry_a: dict, entry_b: dict, id_a: str, id_b: str
     ) -> Optional[str]:
         """Return the composed-scenes folder for this pair, building it once
-        and caching thereafter (in memory here; on disk inside compose_duo).
-        Returns None if composition isn't possible — caller falls back."""
+        and caching thereafter (in memory here; on disk inside the composer).
+        Returns None if composition isn't possible — caller falls back.
+
+        Mode-agnostic: _build_duo_sketch_dir composes from whichever cutouts
+        _cutouts_for turns up, so a diagnostic pair and a server pair take the
+        identical path onto the same data/base_scenes/ backgrounds.
+        """
         cached = self._duo_cache.get(pair_key)
         if cached:
-            return cached
+            if _has_content(Path(cached)):
+                return cached
+            # Evicted under the disk cap (pairs are evicted first) — drop the
+            # stale entry and recompose below.
+            self._duo_cache.pop(pair_key, None)
 
-        if not self._gallery:
-            return None
-
-        gallery_entry_a = self._gallery.get_entry(id_a)
-        gallery_entry_b = self._gallery.get_entry(id_b)
-        if gallery_entry_a is None or gallery_entry_b is None:
-            logger.warning(f"Duo compose: gallery entry missing for '{id_a}' or '{id_b}'")
-            return None
-
-        alpha_path_a = pick_alpha_image(gallery_entry_a.alpha_dir)
-        alpha_path_b = pick_alpha_image(gallery_entry_b.alpha_dir)
-        if alpha_path_a is None or alpha_path_b is None:
-            logger.warning(
-                f"Duo compose: no alpha image(s) found "
-                f"(a={gallery_entry_a.alpha_dir!r}, b={gallery_entry_b.alpha_dir!r})"
-            )
-            return None
-
-        output_dir = DUO_OUTPUT_DIR / f"{id_a}__{id_b}"
-        sketch_dir = compose_duo(
-            self._yunet_detector,
-            alpha_path_a, alpha_path_b,
-            gallery_entry_a.gender, gallery_entry_b.gender,
-            DUO_SCENES_DIR, DUO_SCENES_CONFIG_PATH,
-            output_dir,
-        )
+        sketch_dir = self._build_duo_sketch_dir(entry_a, entry_b, id_a, id_b)
         if sketch_dir:
             self._duo_cache[pair_key] = sketch_dir
         return sketch_dir

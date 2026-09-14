@@ -1,352 +1,285 @@
 # WPU Client
 
-Face recognition slideshow application with modular service architecture, for a
-Raspberry Pi kiosk display.
+A Raspberry Pi kiosk that recognises visitors and shows them personalised
+slides. It runs a fullscreen GTK4 slideshow and, alongside it, an on-device
+face recognition loop. When someone is recognised, the slideshow switches from
+the stock images to that person's own slides; when they leave, it switches back.
 
-## Changelog
+## How it works
 
-### 2026-07-11 — Repo reorganisation, dual-model cleanup, two systemd modes
+```
+camera ──► YuNet detect ──► MobileFaceNet embed (512-D)
+                                     │
+                                     ▼
+                        server /identify  (or local gallery
+                                     │     in diagnostic mode)
+                                     ▼
+                        fetch SAU + FRU cutouts
+                                     │
+                                     ▼
+                    compose onto data/base_scenes/ backgrounds
+                                     │
+                                     ▼
+                              slideshow displays
+```
 
-Restructured the repo for release packaging and fixed several latent bugs, without
-changing the recognition behaviour (both `sface` and `mobilenet` models are still
-supported — this is v1, accuracy is still being validated between them).
+Every visitor is stored as two transparent PNG cutouts — **SAU** (body) and
+**FRU** (face) — not as finished pictures. The Pi composes the finished slides
+itself, pasting those cutouts onto local scene backgrounds. One person in
+frame uses the `*_single` scenes; two recognised people together use the
+`*_duo` scenes.
 
-- **Layout:** `.onnx` model weights moved out of `wpu_client/services/face_recognition/`
-  into a top-level `models/`; `stock_images/` → `data/stock_images/`; the diagnostic
-  gallery `diagnostic_gallery/` → `data/embeddings/`; `config.yaml` → `config/config.yaml`
-  (template at `config/config.yaml.example`); `dataset/` (runtime capture output) →
-  `data/dataset/`. See **Project Structure** below.
-- **Diagnostic gallery pruned to 3 people** (`varun`, `samvaran`, `kevin`) for the
-  release; the other 10 previously-seeded people were moved (not deleted) to a
-  git-ignored `archive/` for reversibility.
-- **`scripts/seed_face.py`** (moved from `tools/`) now seeds **both** models per person
-  (`embedding_sface.npy` + `embedding_mobilenet.npy`) in one pass, matching what
-  `diagnostic_gallery.py` actually expects — the previous copy only wrote a legacy
-  single `embedding.npy`. **`scripts/test_identify_sandbox.py`** (also moved from
-  `tools/`) now reuses the shared embedder module instead of a hand-duplicated
-  detect/align/embed pipeline, and supports `--model {sface,mobilenet}`.
-- **Fixed a slideshow crash:** `sort_mode: "numeric"` (the default) raised
-  `TypeError: '<' not supported between instances of 'int' and 'str'` the moment a
-  non-numerically-named image sat in the same directory as numerically-named ones. The
-  sort key is now type-safe regardless of filename mix; default `sort_mode` is now
-  `"alphabetical"`.
-- **Added `psutil`** to `pyproject.toml` — it's imported unconditionally by
-  `face_service.py` but was missing from declared dependencies.
-- **Two systemd services** (`systemd/slideshow-server.service`,
-  `systemd/slideshow-diagnostic.service`), mutually exclusive via `Conflicts=`, plus
-  `scripts/switch-mode.sh {server|diagnostic}` to flip between them. See **Deployment**.
-- **`scripts/setup.sh`** — idempotent Pi bootstrap (apt deps, venv, models check,
-  systemd install). **`scripts/make_release.sh vX.Y.Z`** — packages a versioned release
-  zip (code + both models + config + stock images + the 3 seeded people).
-- Removed genuinely dead/duplicate files: a stray duplicate `diagnostic_gallery.py`
-  copy, an old backup of `slideshow_service.py`, two orphaned/unreferenced `.onnx`
-  experiments (`exp3_freeze90_arcface.onnx`, `glintr100_int8_static_150.onnx`), the
-  never-read `face_stock_images/` (obsolete gender-based sketch selection, superseded
-  by the per-person diagnostic gallery below), and some stray scratch files.
+The two cutouts are placed by different mechanics and are never mixed into the
+same slide:
 
-### 2026-06-17 Ekanth — Diagnostic (offline) mode
+- **SAU** — scaled and dropped onto a bottom-centre anchor (the anchor is where
+  the feet land).
+- **FRU** — warped onto an eye anchor (scale + rotate + translate).
 
-Added a fully **offline diagnostic mode** so the WPU can recognise people and show
-sketches **without the server / Triton** (useful when the Pi can't reach the
-sandbox, or for a self-contained demo). Toggle with `--diagnostic` (or
-`diagnostic_mode: true` under `face_recognition` in `config.yaml`).
+## Requirements
 
-**Flow:**
-1. **Seed** a known person with `scripts/seed_face.py --name <N> --face <img> [--sketches <dir|img>]`.
-   The same YuNet → SFace/MobileFaceNet pipeline generates an embedding per model, saved
-   to `data/embeddings/<slug>/embedding_<model>.npy` + `meta.json`, alongside a per-person
-   `sketches/` folder.
-2. At runtime the face service **matches live faces against the local gallery**
-   by cosine distance (`diagnostic_match_threshold`, default `0.5`) — no `/identify`
-   call, no network.
-3. On a match it emits `person.detected` carrying that person's `sketch_dir`, and the
-   slideshow shows **that individual's own** sketches from
-   `data/embeddings/<slug>/sketches/`. No face → stock images, as usual.
-
-**Sketches are per-person**, not by gender: each seeded person's face-swap sketch(es)
-live in their own `sketches/` folder and are shown only when *that* person is
-recognised. The render (the actual face-swap) is produced externally and is decoupled
-from the WPU — sketches can be dropped into `sketches/` at seed time (`--sketches`) or
-later when the render is delivered, with no re-seed. If the folder is empty (sketch not
-ready yet), recognition still fires but the slideshow stays on stock images.
-
-**Key files:**
-- `wpu_client/services/face_recognition/sface_embedder.py` — camera-free YuNet+SFace /
-  YuNet+MobileFaceNet embedders (no `picamera2`), the single source of truth shared by
-  the seed tool and verified byte-identical to the live service path.
-- `wpu_client/services/face_recognition/diagnostic_gallery.py` — loads seeded entries
-  (embeddings + per-person `sketches/`) and matches by cosine distance.
-- `scripts/seed_face.py` — seed a face (and optionally sketches) into the local gallery.
-
-### 2026-06-17 Ekanth
-
-Migrated the on-device face-recognition model from **GlintR100-INT8 (512D)** to
-**SFace-128D (OpenCV)** to cut CPU usage on the Raspberry Pi 4 and to make the WPU
-probe embeddings comparable to the registration gallery. A **MobileFaceNet-512D**
-path (→ server's `auraface` gallery) was added alongside it later; both are
-currently kept and selected with `model:` in `config.yaml` (see reorg entry above).
-
-- **Recognition model:** `cv2.FaceRecognizerSF` with
-  `face_recognition_sface_2021dec.onnx` replaces the GlintR100 `onnxruntime`
-  session. SFace is far lighter than AuraFace/GlintR100 — AuraFace was spiking to
-  ~250% CPU (~160% even after INT8 quantization); SFace runs comfortably under one
-  core. SFace is also commercially usable.
-- **Embedding pipeline mirrors the registration server (`SFaceBackend`)
-  exactly**, so the 128D probe vectors are directly comparable to the gallery
-  vectors in the `face_vectors_sface` Qdrant collection:
-  - Keep the **raw YuNet detection row (bbox + 5 landmarks)** — the previous code
-    discarded the landmarks and did a naive bbox crop, which is *not* valid for
-    SFace.
-  - `alignCrop(BGR frame, raw YuNet row)` → 112×112 ArcFace template →
-    `feature()` → **L2-normalise**.
-  - Largest face selected by bbox area (same rule as registration).
-- **API request:** `IdentifyRequest` sends `model="sface"` (or `"auraface"` for the
-  MobileFaceNet path). This is required — the server needs it to disambiguate which
-  gallery a probe vector belongs to, since more than one 128D embedding space exists
-  server-side. The server queries the matching collection and applies its calibrated
-  threshold.
-- Model files (`face_recognition_sface_2021dec.onnx`, `mobilefacenet.onnx`,
-  `face_detection_yunet_2023mar.onnx`) live under `models/`, are bundled in release
-  zips, and are gitignored-by-default with explicit tracking exceptions (see
-  `.gitignore`).
-
-**Operational notes:**
-- The local-cache similarity threshold (`_similarity_threshold = 0.4`, cosine)
-  governs only the "same person still here" de-dup and may need re-tuning per model's
-  distance distribution. Server-side matching uses its own calibrated threshold and is
-  unaffected.
-- WPU can only recognise people who have a vector in the matching server-side
-  collection for the configured model. New registrations get one automatically;
-  older registrations may need backfilling for a newly-added model.
-
-## Features
-
-- **Slideshow Service**: Full-screen image display with configurable timing
-- **Face Recognition Service**: Continuous face detection and identification, either
-  via the registration server or fully offline (diagnostic mode)
-- **Event Bus**: Inter-service communication for displaying recognition results
-- **Configurable**: YAML-based configuration for all settings
-- **Extensible**: Easy to add new services (voice, gesture, etc.)
+- Raspberry Pi with a camera (Pi OS Bookworm or later)
+- Python 3.11+
+- System packages: `python3-picamera2`, `python3-gi`, GTK 4, GStreamer
+- A reachable registration server for base mode
 
 ## Installation
 
 ```bash
-# Using uv (recommended)
-uv sync
-
-# Or with pip, in a venv
-pip install -e .
+git clone <repo> && cd am-wpu-client
+./scripts/setup.sh
 ```
 
-On a fresh Raspberry Pi, prefer `scripts/setup.sh` (see **Deployment** below) — it
-installs system packages, creates the venv, verifies the bundled models are present,
-and installs the systemd units in one idempotent pass.
+`setup.sh` installs the system packages, creates a `--system-site-packages`
+venv (so `picamera2` and `gi` resolve from apt), installs the dependencies,
+verifies the three ONNX models are present, installs the three systemd units,
+enables server mode on boot, and finishes with a pre-flight check.
 
-### System Dependencies
+It installs but does not *start* anything, so the camera stays free and you
+can fix the config before a kiosk goes live.
 
-GTK4 (slideshow UI) and Picamera2 (camera capture) need system packages; there is
-**no `dlib` dependency** in this project, so no `cmake`/`g++`/`libboost` toolchain is
-required.
-
-Video slides (mixed in alongside image slides — see `video_extensions` in
-`config/config.yaml.example`) are decoded with a manual GStreamer pipeline
-(`filesrc ! decodebin ! videoconvert ! appsink`), not `Gtk.MediaFile` — the
-`gtk4paintablesink` package that backend needs isn't available on all
-Debian/Raspberry Pi OS releases, and without it video plays silently but
-never paints a frame. The manual pipeline only needs the plugins below.
-
-**Debian/Ubuntu (incl. Raspberry Pi OS):**
-```bash
-sudo apt install -y \
-    python3 python3-venv python3-dev \
-    libgtk-4-1 gir1.2-gtk-4.0 python3-gi python3-gi-cairo \
-    python3-picamera2 \
-    libgl1 libglib2.0-0 \
-    gir1.2-gstreamer-1.0 gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-    gstreamer1.0-plugins-ugly gstreamer1.0-libav
-```
-
-## Configuration
-
-Copy the template and edit for your deployment:
+Then create a config and point it at your server:
 
 ```bash
 cp config/config.yaml.example config/config.yaml
 ```
 
-```yaml
-services:
-  slideshow:
-    enabled: true
-    full_screen: true
-    advance_time: 3
-    image_directory: "data/stock_images"
+## Configuration
 
-  face_recognition:
-    enabled: true
-    camera_id: 0
-    n: 4
-    model: "sface"  # or "mobilenet" — see Changelog
-    api_endpoint: "http://localhost:8000/api/v1/identify/"
-    detection_interval: 5
-```
+`config/config.yaml`. The full annotated template is
+`config/config.yaml.example`. Three keys matter per device:
 
-`config/config.yaml` itself is gitignored (only `config/config.yaml.example` is
-tracked) so local endpoint/host edits never get committed by accident.
+| Key | What to set it to |
+|---|---|
+| `api_endpoint`, `wpu_endpoint`, `sau_media_endpoint` | Your server's host — all three point at the same machine |
+| `model` | `mobilenet` (MobileFaceNet, 512-D). This is the only gallery the server enrols into |
+| `scale_mode` | `fill` for the 6:7 production panel, `fit` for an ordinary monitor |
 
-## Usage
+`model: sface` selects the 128-D embedder and queries the server's `sface`
+gallery, which is empty in production — it will recognise nobody. It exists
+for local diagnostic use.
+
+## Health check
+
+Before starting anything — and any time a unit misbehaves — ask it what is
+wrong:
 
 ```bash
-# Run all services
-python main.py
-
-# Run only slideshow
-python main.py --service slideshow
-
-# Run only face recognition
-python main.py --service face-recognition
-
-# Use custom config
-python main.py --config /path/to/config.yaml
-
-# Set log level
-python main.py --log-level DEBUG
-
-# Offline diagnostic mode (local gallery, no server)
-python main.py --diagnostic
+python main.py --check
 ```
 
-## Deployment
+```
+wpu-client pre-flight — kiosk-07 — base mode
 
-### Fresh Raspberry Pi setup
+  deps     OK    numpy 1.26.4, opencv 4.11.0, onnxruntime 1.29.0, ...
+  system   OK    picamera2 + gtk4 import
+  models   OK    3/3 present (45 MB)
+  config   OK    host=10.0.0.5:8000 model=mobilenet scale_mode=fill
+  scenes   OK    sau_single 6, sau_duo 4, fru_single 9, fru_duo 4
+  server   FAIL  10.0.0.5:8000 unreachable (ConnectError: ...)
+  camera   OK    imx708 claimable
+  logs     OK    /var/log/wpu-client
+  disk     OK    41203 MB free of 61055 MB
+
+FAIL — 1 check(s) failed: server
+```
+
+It starts no services, opens the camera only when no unit is holding it, and
+**exits 1 if any check fails** — so a fleet tool can assert on it directly.
+`--json` emits the same result as a machine-readable object on stdout:
 
 ```bash
-unzip wpu-client-vX.Y.Z.zip -d am-wpu-client
-cd am-wpu-client
-chmod +rx scripts/setup.sh     # see note below
-./scripts/setup.sh
+python main.py --check --json
+python main.py --check --diagnostic   # checks the gallery instead of the server
 ```
 
-Idempotent — installs apt system packages, creates a `--system-site-packages` venv
-(needed so `picamera2`/`gi` resolve from the system packages above), verifies the
-bundled models are present under `models/`, and installs + enables the
-`slideshow-server` systemd unit (leaving `slideshow-diagnostic` installed but
-disabled).
+Warnings never fail the run. They flag a unit that works but probably not as
+you intended — most often a missing `config/config.yaml`, which leaves the
+client on built-in defaults pointing at a hardcoded host.
 
-The app can be unpacked anywhere and run as any user — `setup.sh` reads the actual
-directory, user, uid and session type off the device and substitutes them into the
-systemd unit templates in `systemd/` before installing them to
-`/etc/systemd/system/`. Do not install those templates by hand; they contain
-`@APP_DIR@`-style placeholders. Fleet convention is `/home/dreamvu/wpu_client`.
+## Services
 
-`config/config.yaml` is **per-device**: untracked, not shipped in the release zip, and
-seeded from `config/config.yaml.example` by step `[5/8]`. Point `api_endpoint` /
-`wpu_endpoint` at the master server before first run — setup echoes their current
-values so a default `localhost` is obvious in the log.
+Three systemd units are installed by `setup.sh`. They are mutually exclusive:
+the two recognition modes both hold the camera, and all three drive the
+fullscreen display, so starting one stops the others.
 
-Production installs `sface` only. The research `mobilenet` model needs `onnxruntime`,
-which is an optional extra rather than a base dependency:
+| Unit | What it runs | On boot |
+|---|---|---|
+| `slideshow-server.service` | Recognition + slideshow, identities from the server | **enabled** |
+| `slideshow-diagnostic.service` | Recognition + slideshow, identities from the local gallery — fully offline | disabled |
+| `slideshow-only.service` | Slideshow alone — no camera, no models, no server | disabled |
+
+Only `slideshow-server` starts on boot. The other two are installed ready to
+go and turned on deliberately.
+
+`scripts/switch-mode.sh` wraps the whole lifecycle:
 
 ```bash
-./.venv/bin/pip install -e '.[research]'   # only if running model: "mobilenet"
+scripts/switch-mode.sh server        # start server mode (stops the others)
+scripts/switch-mode.sh diagnostic    # start offline mode
+scripts/switch-mode.sh only          # start the display alone
+scripts/switch-mode.sh stop          # stop all three, release camera + display
+scripts/switch-mode.sh status        # what is running, and what starts on boot
+scripts/switch-mode.sh logs          # follow the running unit's log
+scripts/switch-mode.sh logs diagnostic
+scripts/switch-mode.sh enable only   # change which mode starts on boot
+scripts/switch-mode.sh disable only
+scripts/switch-mode.sh check         # pre-flight, same as main.py --check
 ```
 
-**Note on the `chmod`:** `unzip` applies the current umask, and an unusual umask can
-land the scripts as mode `111` (`---x--x--x`) — executable but not *readable*, which
-makes `./scripts/setup.sh` fail with "Permission denied" because bash has to read a
-script, not just have `+x` on it. The `chmod` above unsticks `setup.sh` itself;
-step `[0/8]` then re-asserts sane modes across the rest of the tree.
+`status` prints both axes, which are independent — a unit can be running now
+without starting on boot, and vice versa:
 
-### Switching between server and diagnostic mode
+```
+UNIT                           ACTIVE     ON-BOOT
+slideshow-server.service       active     enabled
+slideshow-diagnostic.service   inactive   disabled
+slideshow-only.service         inactive   disabled
+```
+
+`enable` switches which mode owns boot: it disables the other two first, so
+they can never race for the camera at startup.
+
+Underneath it is ordinary systemd, if you prefer it directly:
 
 ```bash
-scripts/switch-mode.sh server      # online recognition via the registration server
-scripts/switch-mode.sh diagnostic  # offline recognition, local 3-person gallery
+sudo systemctl start|stop|restart slideshow-server.service
+sudo systemctl status slideshow-server.service
+sudo systemctl enable|disable slideshow-server.service
+journalctl -u slideshow-server.service -f
+journalctl -u slideshow-server.service --since "1 hour ago"
 ```
 
-The two systemd units declare `Conflicts=` on each other, so starting one always
-stops the other first — they never fight over the camera or display.
+### Logs
 
-### Cutting a release
+Every mode logs to stdout (captured by journald) and to
+`/var/log/wpu-client/app.log`. Lines carry the hostname, so a fleet's logs
+stay legible once aggregated:
+
+```
+2026-09-04 16:11:35 - kiosk-07 - wpu_client.services... - INFO - Local match: Varun
+```
+
+If the log directory is missing or not writable the client still starts and
+logs to stdout only — `main.py --check` reports it under `logs`.
+
+## Running by hand
+
+Stop the services first; whichever is active holds the camera.
 
 ```bash
-git tag v1.0.0
-scripts/make_release.sh v1.0.0     # -> wpu-client-v1.0.0.zip
+scripts/switch-mode.sh stop
+
+python main.py                      # both services, server mode
+python main.py --diagnostic         # offline mode, no server
+python main.py --service slideshow  # slideshow only
+python main.py --log-level DEBUG    # verbose
+python main.py --config path.yaml   # alternate config
 ```
 
-The zip bundles code, both runtime models (~45 MB total), config template, stock
-images, and the 3 seeded diagnostic people — everything needed to `unzip` on a Pi and
-run `scripts/setup.sh`. `dataset/`, `benchmark_output/`, and `archive/` are never
-included.
+## Modes
 
-## Keyboard Controls
+**Base mode** (default) matches faces against the server and fetches each
+person's cutouts from it.
 
-- **ESC** - Exit application
-- **SPACE / RIGHT** - Next image
-- **LEFT** - Previous image
-- **F** - Toggle fullscreen
+**Diagnostic mode** (`--diagnostic`) is fully offline. Faces are matched
+against a local gallery under `data/embeddings/`, seeded with:
 
-## API Format
+```bash
+python scripts/seed_face.py --name "Varun" --face varun.jpg
+```
 
-The face recognition service sends POST requests to `/api/v1/identify/`:
+Each person's two cutouts go in `data/embeddings/<slug>/sketches/`. Which file
+is the body and which is the face is worked out from `meta.json`, then the
+filename, then the image's proportions — so `person.png` + `d6.png` resolve
+correctly as they are. To pin it explicitly, add to `meta.json`:
 
 ```json
-{
-  "type": "face",
-  "n": 4,
-  "model": "sface",
-  "face_vector": [0.1, 0.2, ..., 0.9]
-}
+{ "name": "Varun", "gender": "male", "sau": "person.png", "fru": "d2.png" }
 ```
 
-Expected response:
-```json
-{
-  "success": true,
-  "person_name": "John Doe",
-  "confidence": 0.95,
-  "message": "Face identified successfully"
-}
+Everything after the match — composition, caching, display — is the same code
+as base mode, onto the same `data/base_scenes/` backgrounds. Only the source
+of the identity and the cutouts differs.
+
+## Scenes
+
+Backgrounds and their placement configs live in `data/base_scenes/`:
+
+| Directory | Composes |
+|---|---|
+| `sau_single/` | one body |
+| `sau_duo/` | two bodies |
+| `fru_single/` | one face |
+| `fru_duo/` | two faces |
+
+Each directory has numbered image files and a `scenes_config.json` whose keys
+are the image filename stems. After adding, removing or renaming a background,
+regenerate the derived `name` fields:
+
+```bash
+python scripts/sync_scene_names.py
 ```
 
-## Project Structure
+See `data/base_scenes/README.md` for the config shapes, the gender rules and
+how to tune anchors.
 
-```
-.
-├── wpu_client/                 # main package (unchanged location)
-│   ├── paths.py                 # project-root-relative path resolution
-│   ├── config/                  # configuration management
-│   ├── core/                    # base classes and event bus
-│   ├── services/
-│   │   ├── face_recognition/    # detection + recognition + diagnostic gallery
-│   │   └── slideshow/           # GTK4 slideshow UI
-│   ├── models/                  # API request/response models
-│   └── utils/                   # HTTP client, etc.
-├── models/                     # runtime .onnx weights (bundled + tracked)
-├── data/
-│   ├── stock_images/            # default slideshow images
-│   ├── embeddings/              # diagnostic gallery (3 seeded people, tracked)
-│   └── people/                  # reference photos for the seeded people
-├── archive/                    # git-ignored: pruned diagnostic people, not deleted
-├── config/
-│   ├── config.yaml.example      # tracked template
-│   └── config.yaml              # your local copy (gitignored)
-├── scripts/
-│   ├── setup.sh                 # Pi bootstrap
-│   ├── make_release.sh          # versioned release zip
-│   ├── switch-mode.sh           # server <-> diagnostic
-│   ├── seed_face.py             # seed a person into the diagnostic gallery
-│   ├── test_identify_sandbox.py # test the identify API from a laptop, no Pi needed
-│   └── benchmarks/              # standalone perf scripts, not part of the app
-├── systemd/
-│   ├── slideshow-server.service
-│   └── slideshow-diagnostic.service
-└── main.py                     # entry point
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Stock images only, never a visitor | `onnxruntime` imported cleanly at startup; a failed import aborts the recognition thread |
+| `NumPy 1.x cannot be run in NumPy 2.x` | `pip install --force-reinstall "numpy==1.26.4"` — picamera2 needs the 1.x ABI |
+| Camera busy / cannot be opened | Another unit holds it: `scripts/switch-mode.sh stop` |
+| Recognised, but no slides | No cutouts came back, or no scene matched their gender — run with `--log-level DEBUG` and look for `compose` lines |
+| Nobody is ever recognised | `model` must be `mobilenet`; `sface` queries an empty gallery |
+| Image is stretched or cropped wrong | `scale_mode` doesn't match the panel |
+| Unit won't start, no useful error | `journalctl -u slideshow-server.service -n 50` |
+| Wrong mode came up after a reboot | `scripts/switch-mode.sh status` — check the ON-BOOT column |
+
+Start with `python main.py --check`; it covers most of the table above.
+
+## Development
+
+```bash
+pip install -e '.[dev]'
+pytest
+ruff check .
 ```
 
-## Adding New Services
+## Layout
 
-1. Create a new directory under `wpu_client/services/`
-2. Inherit from `ServiceBase`
-3. Add configuration to `config/settings.py`
-4. Register in `main.py`
+```
+main.py                       entry point, --check, starts/supervises services
+wpu_client/health.py          pre-flight checks behind main.py --check
+config/                       config.yaml + annotated example
+systemd/                      unit templates for the three service modes
+models/                       YuNet detector, MobileFaceNet + SFace embedders
+data/base_scenes/             scene backgrounds + placement configs
+data/stock_images/            idle slideshow content
+data/embeddings/              diagnostic gallery (seeded people)
+wpu_client/services/
+  face_recognition/           detect, embed, identify, fetch, compose
+  slideshow/                  GTK4 display
+scripts/                      setup, mode switch, seeding, sandbox test
+```

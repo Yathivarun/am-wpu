@@ -33,14 +33,58 @@ class FaceRecognitionConfig(BaseModel):
     enabled: bool = True
     camera_id: int = 0
     n: int = 3
-    # Recognition model: "sface" (OpenCV 128-D, light, default) or "mobilenet"
-    # (distilled MobileFaceNet 512-D → server's auraface gallery). Selects both
-    # the on-device embedder and the gallery the identify request queries.
-    model: str = "sface"
-    api_endpoint: str = "http://localhost:8000/api/v1/identify/"
-    # api_endpoint: str = "http://10.2.135.25:8000/api/v1/identify"
-    wpu_endpoint: str = "http://localhost:8000/api/v1/wpu/images"
+    # Recognition model — selects both the on-device embedder and the server
+    # gallery the identify request queries. These are two disjoint vector
+    # spaces, so a mismatch here doesn't degrade accuracy, it returns nothing.
+    #   "mobilenet"  MobileFaceNet 512-D → server's `auraface` gallery. DEFAULT,
+    #                and the only one registrations are actually enrolled into.
+    #   "sface"      OpenCV SFace 128-D → server's `sface` gallery. Lighter on
+    #                CPU, but that gallery is empty on the live cluster, so this
+    #                matches nobody. Kept for the local diagnostic gallery and
+    #                for re-testing if enrolment ever moves back to 128-D.
+    model: str = "mobilenet"
+    # Live cluster host. Every endpoint below points at the same server; only
+    # the host needs changing for a different deployment.
+    api_endpoint: str = "http://192.168.1.19:8000/api/v1/identify/"
+    wpu_endpoint: str = "http://192.168.1.19:8000/api/v1/wpu/images"
     detection_interval: int = 5  # seconds between captures
+
+    # ── Base-mode local composition ─────────────────────────────────────
+    # Base (server-recognition) mode composes each visitor's slides ON THE PI
+    # from two raw alpha cutouts the server serves via wpu_endpoint — a body
+    # cutout ("SAU") and a face cutout ("FRU") — instead of downloading
+    # pre-composed final images. Backgrounds/placement come from the local
+    # data/base_scenes/ configs.
+    #
+    # The server labels the two cutouts explicitly in its response; these
+    # filenames are only the fallback used to pick them out of the older
+    # unlabelled `signed_urls` list, and match what it uploads today
+    # (<registration_id>/wpu/<name>).
+    sau_cutout_filename: str = "sau_cutout.png"
+    fru_cutout_filename: str = "fru_cutout.png"
+
+    # SAU videos. Base of the media route — the registration id is appended as
+    # a path segment (/api/v1/sau/media/<registration_id>), unlike every other
+    # endpoint here, which takes it as a query param.
+    #
+    # Videos are identified by POSITION, not by name: the server stores each
+    # upload under a generated {uuid}{ext} key, so the capture station's
+    # filename never reaches us. The station uploads the composited clip
+    # first, so video_count=1 takes exactly that one and skips the raw
+    # captures behind it. Raise it only to show those too.
+    sau_media_endpoint: str = "http://192.168.1.19:8000/api/v1/sau/media"
+    video_count: int = 1
+    # Rollback valve: True restores the old behaviour of displaying the
+    # server's pre-composed final images fetched from wpu_endpoint, skipping
+    # local composition entirely. One config flip, no redeploy.
+    use_legacy_final_images: bool = False
+    # Disk budget for data/base_assets (fetched cutouts + composed slides +
+    # videos). Composed output is regenerable, so once this is exceeded the
+    # least-recently-used entries are evicted — duo pairs first, since they
+    # grow quadratically with visitor count and rebuild from the retained
+    # per-person cutouts.
+    base_assets_max_bytes: int = 5 * 1024 * 1024 * 1024  # 5 GB
+
     min_face_size: int = 100  # minimum face size in pixels
     display_result: bool = True  # show result on screen overlay
     overlay_hide_delay: int = 3  # seconds to hide overlay
@@ -103,37 +147,22 @@ class Settings(BaseModel):
 
     @classmethod
     def create_default_config(cls, path: Path) -> None:
-        """Create a default configuration file."""
-        default_config = {
-            "log_level": "INFO",
-            "services": {
-                "slideshow": {
-                    "enabled": True,
-                    "full_screen": True,
-                    "advance_time": 3,
-                    "image_directory": "data/stock_images",
-                    "background_color": "black",
-                    "scale_mode": "fill",
-                    "sort_mode": "alphabetical",
-                },
-                "face_recognition": {
-                    "enabled": True,
-                    "camera_id": 0,
-                    "n": 4,
-                    "model": "sface",
-                    "api_endpoint": "http://localhost:8000/api/v1/identify/",
-                    "wpu_endpoint": "http://localhost:8000/api/v1/wpu/images",
-                    "detection_interval": 5,
-                    "min_face_size": 100,
-                    "display_result": True,
-                    "overlay_hide_delay": 3,
-                    "person_timeout": 10,
-                },
-            },
-        }
+        """Write a config file containing this schema's defaults, verbatim.
 
+        Dumped from the models rather than a hand-written literal. The literal
+        that used to live here silently drifted: it still said `model: sface`
+        and pointed both endpoints at localhost long after the defaults moved
+        to mobilenet and the live cluster, so any device that auto-generated
+        its config came up querying an empty gallery on the wrong host.
+
+        This is the fallback for a device with no config at all. The documented
+        starting point is config/config.yaml.example, which carries the same
+        values plus the comments explaining them.
+        """
         with open(path, "w") as f:
-            yaml.dump(default_config, f, default_flow_style=False, sort_keys=False)
+            f.write("# Auto-generated from the built-in defaults.\n")
+            f.write("# See config/config.yaml.example for the commented template.\n")
+            yaml.dump(cls().model_dump(), f, default_flow_style=False, sort_keys=False)
 
         print(f"Created default config at {path}")
 
