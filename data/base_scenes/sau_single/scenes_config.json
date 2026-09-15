@@ -1,32 +1,38 @@
 {
   "1": {
-    "name": "Basavanna statue",
-    "scale": 0.3588,
-    "anchor": [883, 2425]
+    "name": "Statue of Basavanna",
+    "scale": 0.2808,
+    "anchor": [1215, 2597]
   },
   "2": {
-    "name": "Inside Mantapa",
-    "scale": 0.1372,
-    "anchor": [1185, 1580]
+    "name": "Inside Temple - Basavanna statue",
+    "scale": 0.1900,
+    "anchor": [1588, 2078]
   },
   "3": {
-    "name": "outside Temple",
-    "scale": 0.2016,
-    "anchor": [1084, 1810]
+    "name": "Outside Anubhava Mantapa",
+    "scale": 0.3059,
+    "anchor": [1497, 2562]
   },
   "4": {
-    "name": "Mantapa",
-    "scale": 0.2061,
-    "anchor": [931, 1855]
+    "name": "Meeting place of Basavanna and other saints",
+
+    "scale": 0.2557,
+    "anchor": [1291, 2340]
   },
   "5": {
-    "name": "Balcony",
-    "scale": 0.2714,
-    "anchor": [869, 1805]
+    "name": "Balcony of Fantasy Basavakalyan",
+    "scale": 0.3491,
+    "anchor": [1189, 2585]
   },
   "6": {
-    "name": "street",
-    "scale": 0.2676,
-    "anchor": [1026, 1892]
+    "name": "Basavakalyan Street",
+    "scale": 0.3042,
+    "anchor": [1205, 2591]
+  },
+  "7": {
+    "name": "Saints Meeting Ground",
+    "scale": 0.2887,
+    "anchor": [1941, 2089]
   }
 }

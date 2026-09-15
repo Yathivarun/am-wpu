@@ -1,83 +1,92 @@
 {
   "1": {
-    "name": "scholar",
+    "name": "Horse Rider",
     "gender": ["male"],
     "face_anchor": {
-      "target_eye_midpoint": [882, 610],
-      "target_eye_distance": 66,
-      "target_tilt_angle": -2
+      "target_eye_midpoint": [1120, 649],
+      "target_eye_distance": 57,
+      "target_tilt_angle": 0
     }
   },
   "2": {
-    "name": "king on horse",
+    "name": "Meditator",
     "gender": ["male"],
     "face_anchor": {
-      "target_eye_midpoint": [850, 480],
-      "target_eye_distance": 46,
+      "target_eye_midpoint": [1187, 920],
+      "target_eye_distance": 103,
       "target_tilt_angle": 0
     }
   },
   "3": {
-    "name": "meditation",
+    "name": "Scholar",
     "gender": ["male"],
     "face_anchor": {
-      "target_eye_midpoint": [898, 669],
-      "target_eye_distance": 80,
-      "target_tilt_angle": 0
+      "target_eye_midpoint": [1181, 824],
+      "target_eye_distance": 83,
+      "target_tilt_angle": 3
     }
   },
   "4": {
-    "name": "King on mountain",
+    "name": "King on Cliff",
     "gender": ["male"],
     "face_anchor": {
-      "target_eye_midpoint": [816, 690],
-      "target_eye_distance": 34,
+      "target_eye_midpoint": [1085, 930],
+      "target_eye_distance": 42,
       "target_tilt_angle": 0
     }
   },
   "5": {
-    "name": "meditation",
-    "gender": ["female"],
+    "name": "Dancer",
+    "gender": ["male"],
     "face_anchor": {
-      "target_eye_midpoint": [882, 590],
-      "target_eye_distance": 83,
-      "target_tilt_angle": 0
+      "target_eye_midpoint": [1161, 625],
+      "target_eye_distance": 87,
+      "target_tilt_angle": 2
     }
   },
   "6": {
-    "name": "warrior on horse",
+    "name": "Dancer",
     "gender": ["female"],
     "face_anchor": {
-      "target_eye_midpoint": [867, 584],
-      "target_eye_distance": 40,
-      "target_tilt_angle": -2
+      "target_eye_midpoint": [1166, 522],
+      "target_eye_distance": 91,
+      "target_tilt_angle": -3
     }
   },
   "7": {
-    "name": "princess",
+    "name": "Princess in Palace",
     "gender": ["female"],
     "face_anchor": {
-      "target_eye_midpoint": [873, 590],
-      "target_eye_distance": 54,
+      "target_eye_midpoint": [1161, 818],
+      "target_eye_distance": 64,
       "target_tilt_angle": 0
     }
   },
   "8": {
-    "name": "warrior",
+    "name": "Female Sword Warrior",
     "gender": ["female"],
     "face_anchor": {
-      "target_eye_midpoint": [890, 595],
-      "target_eye_distance": 51,
+      "target_eye_midpoint": [1177, 804],
+      "target_eye_distance": 62,
       "target_tilt_angle": 0
     }
   },
   "9": {
-    "name": "dancer",
+    "name": "Female Horse Rider",
     "gender": ["female"],
     "face_anchor": {
-      "target_eye_midpoint": [939, 395],
-      "target_eye_distance": 81,
-      "target_tilt_angle": 3
+      "target_eye_midpoint": [1152, 790],
+      "target_eye_distance": 48,
+      "target_tilt_angle": -2
+    }
+  },
+  "10": {
+    "name": "Meditator",
+    "gender": ["female"],
+    "face_anchor": {
+      "target_eye_midpoint": [1176, 817],
+      "target_eye_distance": 107,
+      "target_tilt_angle": 0
     }
   }
 }
