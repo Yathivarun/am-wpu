@@ -1,30 +1,37 @@
 {
   "1": {
-    "name": "Basavanna statue",
-    "scale_1": 0.3588,
-    "anchor_1": [700, 1972],
-    "scale_2": 0.3588,
-    "anchor_2": [1113, 1972]
+    "name": "Statue of Basavanna",
+    "scale_1": 0.2808,
+    "anchor_1": [965, 2597],
+    "scale_2": 0.2088,
+    "anchor_2": [1465, 2597]
   },
   "2": {
-    "name": "Inside Mantapa",
-    "scale_1": 0.1372,
-    "anchor_1": [571, 1571],
-    "scale_2": 0.1372,
-    "anchor_2": [1185, 1580]
-  },
-  "3": {
-    "name": "Balcony",
-    "scale_1": 0.2314,
-    "anchor_1": [729, 1813],
-    "scale_2": 0.2314,
-    "anchor_2": [1081, 1813]
+    "name": "Inside Temple - Basavanna statue",
+    "scale_1": 0.1900,
+    "anchor_1": [1338, 2078],
+    "scale_2": 0.1900,
+    "anchor_2": [1838, 2078]
   },
   "4": {
-    "name": "Street",
-    "scale_1": 0.2276,
-    "anchor_1": [828, 1892],
-    "scale_2": 0.2276,
-    "anchor_2": [1026, 1892]
+    "name": "Meeting place of Basavanna and other saints",
+    "scale_1": 0.2557,
+    "anchor_1": [1041, 2340],
+    "scale_2": 0.2557,
+    "anchor_2": [1541, 2340]
+  },
+  "5": {
+    "name": "Balcony of Fantasy Basavakalyan",
+    "scale_1": 0.3491,
+    "anchor_1": [939, 2585],
+    "scale_2": 0.3491,
+    "anchor_2": [1439, 2585]
+  },
+  "6": {
+    "name": "Basavakalyan Street",
+    "scale_1": 0.3042,
+    "anchor_1": [955, 2591],
+    "scale_2": 0.3042,
+    "anchor_2": [1455, 2591]
   }
 }

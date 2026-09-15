@@ -58,10 +58,47 @@ enables server mode on boot, and finishes with a pre-flight check.
 It installs but does not *start* anything, so the camera stays free and you
 can fix the config before a kiosk goes live.
 
+Steps can be run on their own — useful when re-applying one thing, and it is
+how a deploy tool drives it:
+
+```bash
+./scripts/setup.sh --list                # perms apt venv dirs models config units enable check
+./scripts/setup.sh --skip-apt            # everything but the slow half
+./scripts/setup.sh config units          # just these
+WPU_USER=dreamvu ./scripts/setup.sh      # when running as root; the kiosk never runs as root
+```
+
 Then create a config and point it at your server:
 
 ```bash
 cp config/config.yaml.example config/config.yaml
+```
+
+### Art assets
+
+The repo tracks the smallest set that boots a working kiosk — one background
+per scene directory, three stock images, and the models. The full collection
+lives on an asset host:
+
+```bash
+ASSETS_URL=http://192.168.1.10/wpu ./scripts/fetch_assets.sh
+./scripts/fetch_assets.sh --verify          # what is here, what is missing
+```
+
+`ASSETS_URL` may be `http(s)://`, `rsync://`, or a plain path (a mount, a USB
+stick, another checkout). Every asset is checksummed in `data/assets.manifest`;
+a file already present and correct is skipped, so a re-run resumes rather than
+restarts, and nothing is ever deleted.
+
+A unit that has not fetched still runs — it composes onto the backgrounds it
+has. `--check` reports the gap as `scenes WARN — N config key(s) have no
+image`.
+
+Adding art: drop it in, then regenerate the manifest and pack it for the host.
+
+```bash
+./scripts/make_assets.sh                    # manifest + wpu-assets.tar.gz
+./scripts/make_assets.sh --manifest         # manifest only
 ```
 
 ## Configuration
@@ -89,7 +126,7 @@ python main.py --check
 ```
 
 ```
-wpu-client pre-flight — kiosk-07 — base mode
+wpu-client v1.2.0 — pre-flight — kiosk-07 — base mode
 
   deps     OK    numpy 1.26.4, opencv 4.11.0, onnxruntime 1.29.0, ...
   system   OK    picamera2 + gtk4 import
@@ -98,7 +135,9 @@ wpu-client pre-flight — kiosk-07 — base mode
   scenes   OK    sau_single 6, sau_duo 4, fru_single 9, fru_duo 4
   server   FAIL  10.0.0.5:8000 unreachable (ConnectError: ...)
   camera   OK    imx708 claimable
+  identity OK    pi-100000003d1f9d2a (from /proc/cpuinfo serial)
   logs     OK    /var/log/wpu-client
+  alloy    OK    shipping journal, config /etc/alloy/config.alloy
   disk     OK    41203 MB free of 61055 MB
 
 FAIL — 1 check(s) failed: server
@@ -172,16 +211,64 @@ journalctl -u slideshow-server.service --since "1 hour ago"
 
 ### Logs
 
-Every mode logs to stdout (captured by journald) and to
-`/var/log/wpu-client/app.log`. Lines carry the hostname, so a fleet's logs
-stay legible once aggregated:
+Every mode logs to stdout — captured by journald, so `journalctl -u <unit>` is
+the primary view — and to `/var/log/wpu-client/app.log` for a plain `tail -f`.
+That file is rotated daily, seven days kept (`/etc/logrotate.d/wpu-client`).
+
+Each line carries the **device id**, not the hostname:
 
 ```
-2026-09-04 16:11:35 - kiosk-07 - wpu_client.services... - INFO - Local match: Varun
+2026-09-04 16:11:35 - pi-100000003d1f9d2a - wpu_client.services... - INFO - Local match: Varun
 ```
 
-If the log directory is missing or not writable the client still starts and
-logs to stdout only — `main.py --check` reports it under `logs`.
+The fleet is imaged from one card, so every unit answers to the same hostname
+and it identifies nothing. The device id is taken from the first of these that
+answers:
+
+| Source | When |
+|---|---|
+| `WPU_DEVICE_ID` in the environment | a deploy tool naming devices by position |
+| `/etc/wpu-client/device-id` | the same, without touching the unit files |
+| SoC serial from `/proc/cpuinfo` | **the default** — unique per board, no provisioning needed |
+| hostname | off-Pi only; `--check` warns when it gets this far |
+
+Nothing on the per-frame path logs at INFO. The recognition loop runs once a
+second whether or not anyone is present, so INFO is reserved for transitions —
+a person arriving, being identified, timing out, leaving. Everything else is
+one level away:
+
+```bash
+python main.py --log-level DEBUG     # per-frame detail, for one run
+```
+
+Set `log_level` in `config/config.yaml` to change it for the service;
+`--log-level` overrides the file when given.
+
+### Shipping logs off the device
+
+Optional, and separate from the app: a unit with no log shipping runs the
+kiosk perfectly well. [Grafana Alloy](https://grafana.com/docs/alloy/) reads
+this unit's journal and pushes it to Loki.
+
+```bash
+scripts/install-alloy.sh                                    # uses the default Loki
+LOKI_URL=http://10.0.0.2:3100/loki/api/v1/push scripts/install-alloy.sh
+```
+
+It installs Alloy, renders `deploy/alloy/config.alloy.template` with this
+unit's Loki URL and device id, and starts it. `main.py --check` reports it
+under `alloy`.
+
+The journal is shipped rather than `app.log` because it also carries what the
+app cannot log about itself — import-time crashes, libcamera and GTK errors on
+stderr, systemd restart loops — and because `unit` becomes a Grafana label, so
+a query can tell the three modes apart:
+
+```logql
+{application="wpu-client", device="pi-100000003d1f9d2a"}
+{application="wpu-client"} | unit = "slideshow-server.service"
+{application="wpu-client"} |= "ERROR"
+```
 
 ## Running by hand
 
@@ -272,14 +359,18 @@ ruff check .
 ```
 main.py                       entry point, --check, starts/supervises services
 wpu_client/health.py          pre-flight checks behind main.py --check
+wpu_client/device.py          this unit's identity (SoC serial, overridable)
 config/                       config.yaml + annotated example
 systemd/                      unit templates for the three service modes
+deploy/alloy/                 Alloy config template — journal to Loki
+deploy/logrotate/             rotation for /var/log/wpu-client/app.log
 models/                       YuNet detector, MobileFaceNet + SFace embedders
 data/base_scenes/             scene backgrounds + placement configs
 data/stock_images/            idle slideshow content
-data/embeddings/              diagnostic gallery (seeded people)
+data/embeddings/              diagnostic gallery (seeded people; fetched)
+data/assets.manifest          the complete art set, checksummed
 wpu_client/services/
   face_recognition/           detect, embed, identify, fetch, compose
   slideshow/                  GTK4 display
-scripts/                      setup, mode switch, seeding, sandbox test
+scripts/                      setup, mode switch, alloy install, assets, seeding
 ```

@@ -1,7 +1,0 @@
-{
-  "name": "Samvaran",
-  "models": [
-    "mobilenet",
-    "sface"
-  ]
-}

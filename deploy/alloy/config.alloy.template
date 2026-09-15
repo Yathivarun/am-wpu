@@ -1,0 +1,69 @@
+// TEMPLATE — do not install this file directly.
+// scripts/install-alloy.sh substitutes @LOKI_URL@ and @DEVICE_ID@ and writes
+// the result to /etc/alloy/config.alloy. Ansible templates the same two
+// values; this file is the single definition of what gets shipped.
+// Everything above the next line is stripped on render; keep it there.
+//---8<---
+
+logging {
+  level = "info"
+}
+
+// ── Source: the journal, not the log file ────────────────────────────────
+//
+// The app also writes /var/log/wpu-client/app.log, and an earlier single-Pi
+// setup tailed that. The journal is the better source for a fleet:
+//
+//   * `unit` becomes a label, so a query can separate server / diagnostic /
+//     display-only mode without the app having to report which it is.
+//   * It captures what app.log structurally cannot — import-time crashes,
+//     GTK and libcamera messages on stderr, and systemd's own restart
+//     storms. A unit that dies before logging.basicConfig() runs is exactly
+//     the failure worth seeing, and it leaves no trace in the file.
+//   * journald caps its own disk use, so this needs no rotation policy.
+//
+// The file remains for on-device `tail -f`; nothing ships it.
+loki.relabel "journal" {
+  forward_to = []
+
+  // Only this project's units. Dropping the rest keeps a Pi's kernel and apt
+  // chatter out of Loki, which at 50 units would be most of the volume.
+  //
+  // Done here rather than with loki.source.journal's `matches`: that argument
+  // does not support the journal's `+` OR separator, so three _SYSTEMD_UNIT
+  // terms would be ANDed and match nothing at all — a filter that silently
+  // ships zero lines rather than erroring.
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    regex         = "slideshow-(server|diagnostic|only)\\.service"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+}
+
+loki.source.journal "wpu" {
+  forward_to    = [loki.write.loki_server.receiver]
+  relabel_rules = loki.relabel.journal.rules
+  labels        = { job = "wpu-client" }
+}
+
+loki.write "loki_server" {
+  endpoint {
+    url = "@LOKI_URL@"
+  }
+  external_labels = {
+    application = "wpu-client",
+    // NOT constants.hostname. Every unit is imaged from the same card and
+    // answers to the same name, so the hostname would collapse 50 streams
+    // into one. This is the device id — SoC serial by default, overridable.
+    // See wpu_client/device.py.
+    device      = "@DEVICE_ID@",
+  }
+}

@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from wpu_client.core.service_base import ServiceBase
+from wpu_client.device import device_id
 
 # Deliberately NOT imported here: face_service and slideshow_service, which
 # pull in picamera2, cv2 and onnxruntime at module scope. `--check` exists to
@@ -45,9 +46,10 @@ def configure_logging(level: str = "INFO", to_file: bool = True) -> None:
 
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
-        # The hostname is what makes 50 units' logs legible once they are
-        # aggregated; without it every line looks the same.
-        format=f"%(asctime)s - {os.uname().nodename} - %(name)s - %(levelname)s - %(message)s",
+        # The device id is what makes 50 units' logs legible once they are
+        # aggregated. Not the hostname: the fleet is imaged from one card, so
+        # every unit answers to the same name. See wpu_client/device.py.
+        format=f"%(asctime)s - {device_id()} - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=handlers,
         force=True,
@@ -134,8 +136,10 @@ def main():
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        default="INFO",
-        help="Set logging level (default: INFO)",
+        # No default: absent means "whatever config.yaml says". A default here
+        # would silently outrank log_level in the config file, which is the
+        # one place a fleet can set it centrally.
+        help="Set logging level (default: log_level from config.yaml, else INFO)",
     )
     parser.add_argument(
         "--diagnostic",
@@ -163,11 +167,12 @@ def main():
         configure_logging("WARNING", to_file=False)
         sys.exit(run_preflight(args))
 
-    configure_logging(args.log_level)
-
     from wpu_client.config.settings import get_settings, reload_settings
 
+    # Settings first, logging second: config.yaml carries log_level, and the
+    # loader only prints (it does not log), so nothing is lost by waiting.
     settings = reload_settings(args.config) if args.config else get_settings()
+    configure_logging(args.log_level or settings.log_level)
 
     # --diagnostic overrides config: offline local recognition + local sketches
     if args.diagnostic:
