@@ -16,9 +16,13 @@ cd "$APP_DIR"
 MANIFEST="data/assets.manifest"
 TARBALL="wpu-assets.tar.gz"
 
-# Everything under these, minus the configs (text, always tracked) and the
-# regenerable caches.
-ROOTS=(data/base_scenes data/stock_images data/embeddings data/people)
+# Production art only — what a base/server-mode kiosk needs to display.
+# data/embeddings/ and data/people/ are diagnostic-mode seed data (offline
+# gallery + its source photos): never read by server-mode recognition or by
+# any always-on health check, reseeded independently with scripts/seed_face.py,
+# and already gitignored/untracked on their own terms. Locking them here would
+# make every diagnostic reseed a manifest regen for art no production unit uses.
+ROOTS=(data/base_scenes data/stock_images)
 
 echo "Scanning: ${ROOTS[*]}"
 {
@@ -32,9 +36,7 @@ echo "Scanning: ${ROOTS[*]}"
   echo "# full set. Generated $(date -u +%Y-%m-%dT%H:%M:%SZ)."
   # scenes_config.json is excluded because it stays tracked in git — it is the
   # scene definitions, not art, and the boot set needs it. Everything else
-  # under these roots is an asset, meta.json included: a gallery person's
-  # metadata travels with the images it describes, and excluding it would
-  # leave it neither tracked nor fetched.
+  # under these roots is an asset.
   find "${ROOTS[@]}" -type f \
     ! -name 'scenes_config.json' ! -name '.gitkeep' \
     -print0 2>/dev/null \
