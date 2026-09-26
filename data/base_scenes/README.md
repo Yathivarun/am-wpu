@@ -36,8 +36,10 @@ between them.
 ## Backgrounds
 
 **No background images are checked in yet** — drop them in beside each
-`scenes_config.json`. Until then these configs compose nothing, base mode falls
-back to the server's pre-composed images, and nothing breaks.
+`scenes_config.json`. Until then these configs compose nothing and, with
+`scene_source_fallback` on, the unit falls back to pre-composed scenes (the
+server's in base mode, the gallery's `scenes/` in diagnostic mode) — nothing
+breaks.
 
 - Filename stem must equal the JSON key: key `"3"` → `3.png` (`.jpg`/`.jpeg` also work).
 - A key with no matching image is skipped; an image with no matching key is

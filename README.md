@@ -302,12 +302,34 @@ filename, then the image's proportions — so `person.png` + `d6.png` resolve
 correctly as they are. To pin it explicitly, add to `meta.json`:
 
 ```json
-{ "name": "Varun", "gender": "male", "sau": "person.png", "fru": "d2.png" }
+{ "name": "Varun", "gender": "male", "height_cm": 172, "sau": "person.png", "fru": "d2.png" }
 ```
 
 Everything after the match — composition, caching, display — is the same code
 as base mode, onto the same `data/base_scenes/` backgrounds. Only the source
 of the identity and the cutouts differs.
+
+### Composed on the Pi, or pre-composed
+
+`scene_source` (face_recognition config) picks where a visitor's scene slides
+come from:
+
+| `scene_source` | Base mode | Diagnostic mode |
+|---|---|---|
+| `compose` (default) | composed on the Pi from the two cutouts | same, from the gallery cutouts |
+| `precomposed` | the server's composed scenes (`scene_signed_urls` on `wpu_endpoint`) | images in `data/embeddings/<slug>/scenes/` |
+
+With `scene_source_fallback: true` (default), a source that yields no slides
+for a person falls through to the other — a unit composing locally still shows
+something if its scene art is missing, and a unit showing pre-composed scenes
+composes when the server has none. Diagnostic mode never contacts the server
+either way. Duo slides only ever come from composing (nobody pre-composes
+pairs). `use_legacy_final_images: true` is a deprecated alias for
+`scene_source: precomposed`.
+
+Bodies are scaled by the visitor's height — `height_cm` from the identify
+response, or from `meta.json` in diagnostic mode — falling back to each
+scene's reference height when unknown.
 
 ## Scenes
 
@@ -338,7 +360,7 @@ how to tune anchors.
 | Stock images only, never a visitor | `onnxruntime` imported cleanly at startup; a failed import aborts the recognition thread |
 | `NumPy 1.x cannot be run in NumPy 2.x` | `pip install --force-reinstall "numpy==1.26.4"` — picamera2 needs the 1.x ABI |
 | Camera busy / cannot be opened | Another unit holds it: `scripts/switch-mode.sh stop` |
-| Recognised, but no slides | No cutouts came back, or no scene matched their gender — run with `--log-level DEBUG` and look for `compose` lines |
+| Recognised, but no slides | No cutouts (or pre-composed scenes) came back, or no scene matched their gender — run with `--log-level DEBUG` and look for `compose` / `Pre-composed` lines |
 | Nobody is ever recognised | `model` must be `mobilenet`; `sface` queries an empty gallery |
 | Image is stretched or cropped wrong | `scale_mode` doesn't match the panel |
 | Unit won't start, no useful error | `journalctl -u slideshow-server.service -n 50` |

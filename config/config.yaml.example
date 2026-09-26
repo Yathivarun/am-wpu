@@ -79,8 +79,13 @@ services:
     # the raw captures behind it; 0 disables video fetching entirely.
     sau_media_endpoint: "http://192.168.1.19:8000/api/v1/sau/media"
     video_count: 1
-    # Rollback valve: set true to go back to displaying the server's
-    # pre-composed final images and skip local composition entirely.
+    # Where scene slides come from: "compose" (on the Pi, from the cutouts)
+    # or "precomposed" (the server's composed scenes in base mode; the
+    # person's data/embeddings/<slug>/scenes/ images in diagnostic mode).
+    # With the fallback on, a source that yields nothing tries the other.
+    scene_source: "compose"
+    scene_source_fallback: true
+    # Deprecated: true is the same as scene_source: "precomposed".
     use_legacy_final_images: false
     # Disk budget for data/base_assets. Composed slides are regenerable, so
     # once this is exceeded the least-recently-used entries are evicted —

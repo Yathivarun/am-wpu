@@ -402,3 +402,96 @@ def test_budget_disabled_when_cap_not_positive(tmp_path, cap):
 
 def test_budget_on_missing_dir_is_noop(tmp_path):
     assert enforce_disk_budget(tmp_path / "absent", 1024) == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Pre-composed scenes (scene_source: precomposed, or the compose fallback)
+# ─────────────────────────────────────────────────────────────────────────
+
+from wpu_client.services.face_recognition.asset_fetcher import (  # noqa: E402
+    PRECOMPOSED_PREFIX,
+    clear_precomposed,
+    fetch_precomposed_scenes,
+    link_precomposed_into,
+)
+
+
+class SceneHTTP(FakeHTTP):
+    """FakeHTTP whose listing also carries pre-composed scene URLs."""
+
+    def __init__(self, scenes=("sau_scene_1.jpg", "fru_scene_2.jpg"), listing=True, **kw):
+        super().__init__(**kw)
+        self.scenes = scenes
+        self.listing = listing
+
+    def get_json_once(self, url, params=None, headers=None):
+        body = super().get_json_once(url, params, headers)
+        if body is None or "/sau/media" in url or not self.listing:
+            return body
+        body["scene_signed_urls"] = [f"{OBJECT_BASE}/wpu/{n}?X-Amz-Signature=abc" for n in self.scenes]
+        return body
+
+
+def test_precomposed_scenes_are_fetched_and_cached(tmp_path):
+    http = SceneHTTP()
+    scenes = fetch_precomposed_scenes(http, IMAGES_URL, RID, tmp_path)
+    assert [p.name for p in scenes] == ["fru_scene_2.jpg", "sau_scene_1.jpg"]
+    assert http.downloads == 2
+    again = fetch_precomposed_scenes(http, IMAGES_URL, RID, tmp_path)
+    assert [p.name for p in again] == [p.name for p in scenes]
+    assert http.downloads == 2                       # revalidated, not re-downloaded
+
+
+def test_precomposed_scenes_the_server_dropped_are_pruned(tmp_path):
+    fetch_precomposed_scenes(SceneHTTP(), IMAGES_URL, RID, tmp_path)
+    scenes = fetch_precomposed_scenes(SceneHTTP(scenes=("sau_scene_1.jpg",)), IMAGES_URL, RID, tmp_path)
+    assert [p.name for p in scenes] == ["sau_scene_1.jpg"]
+    assert not (tmp_path / "raw" / "scenes" / "fru_scene_2.jpg").exists()
+
+
+def test_a_listing_without_scenes_means_none(tmp_path):
+    fetch_precomposed_scenes(SceneHTTP(), IMAGES_URL, RID, tmp_path)
+    assert fetch_precomposed_scenes(SceneHTTP(listing=False), IMAGES_URL, RID, tmp_path) == []
+
+
+def test_offline_keeps_cached_precomposed_scenes(tmp_path):
+    fetch_precomposed_scenes(SceneHTTP(), IMAGES_URL, RID, tmp_path)
+    scenes = fetch_precomposed_scenes(SceneHTTP(offline=True), IMAGES_URL, RID, tmp_path)
+    assert len(scenes) == 2
+
+
+@pytest.mark.parametrize("name", ["../../etc/passwd", "notes.txt", ".hidden.jpg"])
+def test_unsafe_or_non_image_scene_names_are_ignored(tmp_path, name):
+    scenes = fetch_precomposed_scenes(SceneHTTP(scenes=(name,)), IMAGES_URL, RID, tmp_path)
+    assert all(p.parent == tmp_path / "raw" / "scenes" for p in scenes)
+    assert all(p.suffix in (".jpg", ".jpeg", ".png") and not p.name.startswith(".") for p in scenes)
+
+
+def test_link_precomposed_prefixes_and_replaces(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    a, b = raw / "sau_scene_1.jpg", raw / "fru_scene_2.jpg"
+    a.write_bytes(b"a")
+    b.write_bytes(b"b")
+    display = tmp_path / "display"
+    display.mkdir()
+    (display / "sau_scene_9.jpg").write_bytes(b"composed")   # composer's file: untouched
+
+    assert link_precomposed_into([a, b], display) == 2
+    assert sorted(p.name for p in display.iterdir()) == [
+        f"{PRECOMPOSED_PREFIX}fru_scene_2.jpg", f"{PRECOMPOSED_PREFIX}sau_scene_1.jpg", "sau_scene_9.jpg",
+    ]
+    link_precomposed_into([a], display)                       # server dropped one
+    assert not (display / f"{PRECOMPOSED_PREFIX}fru_scene_2.jpg").exists()
+
+    clear_precomposed(display)
+    assert [p.name for p in display.iterdir()] == ["sau_scene_9.jpg"]
+
+
+def test_fetch_can_skip_the_cutouts(tmp_path):
+    """A unit showing pre-composed scenes has no use for the cutouts."""
+    http = FakeHTTP(videos=1)
+    result = fetch_person_assets(http, IMAGES_URL, MEDIA_URL, RID, "sau_cutout.png",
+                                 "fru_cutout.png", 1, tmp_path, fetch_cutouts=False)
+    assert result["sau"] is None and result["fru"] is None
+    assert len(result["videos"]) == 1 and http.downloads == 1

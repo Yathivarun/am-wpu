@@ -1,10 +1,10 @@
 """Configuration management for WPU Client."""
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from wpu_client.paths import CONFIG_DIR
 
@@ -74,10 +74,26 @@ class FaceRecognitionConfig(BaseModel):
     # captures behind it. Raise it only to show those too.
     sau_media_endpoint: str = "http://192.168.1.19:8000/api/v1/sau/media"
     video_count: int = 1
-    # Rollback valve: True restores the old behaviour of displaying the
-    # server's pre-composed final images fetched from wpu_endpoint, skipping
-    # local composition entirely. One config flip, no redeploy.
+    # Where a visitor's scene slides come from:
+    #   "compose"      compose them on the Pi from the two cutouts (default)
+    #   "precomposed"  show scenes already composed elsewhere — in base mode
+    #                  the server's (the optional `scene_signed_urls` list on
+    #                  wpu_endpoint); in diagnostic mode the images in the
+    #                  person's data/embeddings/<slug>/scenes/ folder. Never
+    #                  the server in diagnostic mode.
+    # With scene_source_fallback on, a source that yields no slides for a
+    # person falls through to the other one.
+    scene_source: Literal["compose", "precomposed"] = "compose"
+    scene_source_fallback: bool = True
+    # Deprecated alias for scene_source: precomposed (it used to make the
+    # slideshow fetch the server's final images directly).
     use_legacy_final_images: bool = False
+
+    @model_validator(mode="after")
+    def _legacy_valve_means_precomposed(self):
+        if self.use_legacy_final_images:
+            self.scene_source = "precomposed"
+        return self
     # Disk budget for data/base_assets (fetched cutouts + composed slides +
     # videos). Composed output is regenerable, so once this is exceeded the
     # least-recently-used entries are evicted — duo pairs first, since they

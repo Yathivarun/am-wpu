@@ -23,14 +23,20 @@ from wpu_client.paths import DATA_DIR, MODELS_DIR
 from wpu_client.services.face_recognition.asset_fetcher import (
     DISPLAY_DIR_NAME,
     FRU_LOCAL_NAME,
+    IMAGE_SUFFIXES,
     RAW_DIR_NAME,
     SAU_LOCAL_NAME,
+    clear_precomposed,
     enforce_disk_budget,
     fetch_person_assets,
+    fetch_precomposed_scenes,
+    link_precomposed_into,
     link_videos_into,
     touch,
 )
 from wpu_client.services.face_recognition.base_composer import (
+    BODY_PREFIX,
+    FACE_PREFIX,
     compose_duo_body,
     compose_duo_face,
     compose_single_body,
@@ -45,6 +51,10 @@ logger = logging.getLogger(__name__)
 DATASET_DIR = str(DATA_DIR / "dataset")
 DATASET_MAX_BYTES = 30 * 1024 * 1024 * 1024  # 30 GB hard cap
 DATASET_MAX_FRAMES_PER_VISIT = 50             # max frames saved per visit
+
+# Diagnostic mode's pre-composed scenes: data/embeddings/<slug>/scenes/,
+# beside the person's sketches/ cutouts folder (scene_source: precomposed).
+PRECOMPOSED_GALLERY_DIR = "scenes"
 
 # ── Local composition (both modes) ──────────────────────────────────────────
 # Every visitor's slides are composed ON THE PI from two raw alpha cutouts —
@@ -134,6 +144,27 @@ CAMERA_MAIN_SIZE = (1640, 1232)      # detection / dataset capture — full FOV
 CAMERA_MAIN_FORMAT = "RGB888"
 CAMERA_LORES_SIZE = (320, 240)       # live preview — full FOV, cheap to pull
 CAMERA_LORES_FORMAT = "YUV420"
+
+
+def _has_composed_slides(display_dir: Path) -> bool:
+    """Whether the composer wrote any scene slide (videos don't count)."""
+    try:
+        return display_dir.is_dir() and any(
+            p.name.startswith((BODY_PREFIX, FACE_PREFIX)) for p in display_dir.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _clear_composed(display_dir: Path) -> None:
+    """Remove composed slides (and their stamps) — used when pre-composed
+    scenes take over, so the two sets are never shown together."""
+    try:
+        for p in display_dir.iterdir():
+            if p.name.startswith((BODY_PREFIX, FACE_PREFIX, f".{BODY_PREFIX}", f".{FACE_PREFIX}")):
+                p.unlink()
+    except OSError:
+        pass
 
 
 def _has_content(path: Path) -> bool:
@@ -1042,23 +1073,19 @@ class FaceRecognitionService(ServiceBase):
 
         assets_dir = self._assets_dir(registration_id)
         display_dir = assets_dir / DISPLAY_DIR_NAME
+        sources = self._scene_sources()
 
         try:
             if self._diagnostic_mode:
                 cutouts = self._cutouts_for(registration_id)
                 videos: list[Path] = []
                 stale = self._cutouts_are_newer_than(cutouts, display_dir)
+                have_cutouts = True
             else:
-                assets = fetch_person_assets(
-                    self._http_client,
-                    self.config.wpu_endpoint,
-                    getattr(self.config, "sau_media_endpoint", ""),
-                    registration_id,
-                    getattr(self.config, "sau_cutout_filename", "sau_cutout.png"),
-                    getattr(self.config, "fru_cutout_filename", "fru_cutout.png"),
-                    int(getattr(self.config, "video_count", 1) or 0),
-                    assets_dir,
-                )
+                # Cutouts are only worth downloading up front when composing
+                # comes first; a fallback to composing fetches them then.
+                have_cutouts = sources[0] == "compose"
+                assets = self._fetch_assets(registration_id, assets_dir, have_cutouts)
                 cutouts = {"sau": assets["sau"], "fru": assets["fru"]}
                 videos = assets["videos"]
                 stale = bool(assets["changed"])
@@ -1073,14 +1100,33 @@ class FaceRecognitionService(ServiceBase):
                 shutil.rmtree(display_dir, ignore_errors=True)
                 self._invalidate_duo_caches_for(registration_id)
 
-            compose_single_body(
-                cutouts["sau"], SAU_SINGLE_DIR, SAU_SINGLE_CONFIG_PATH, display_dir,
-                height_cm=height_cm,
-            )
-            compose_single_face(
-                self._yunet_detector, cutouts["fru"], gender,
-                FRU_SINGLE_DIR, FRU_SINGLE_CONFIG_PATH, display_dir,
-            )
+            for source in sources:
+                if source == "compose":
+                    if not have_cutouts:
+                        assets = self._fetch_assets(registration_id, assets_dir, True)
+                        cutouts = {"sau": assets["sau"], "fru": assets["fru"]}
+                        if assets["changed"] & {"sau", "fru"}:
+                            _clear_composed(display_dir)
+                            self._invalidate_duo_caches_for(registration_id)
+                    compose_single_body(
+                        cutouts["sau"], SAU_SINGLE_DIR, SAU_SINGLE_CONFIG_PATH, display_dir,
+                        height_cm=height_cm,
+                    )
+                    compose_single_face(
+                        self._yunet_detector, cutouts["fru"], gender,
+                        FRU_SINGLE_DIR, FRU_SINGLE_CONFIG_PATH, display_dir,
+                    )
+                    if _has_composed_slides(display_dir):
+                        clear_precomposed(display_dir)
+                        break
+                else:
+                    scenes = self._precomposed_scenes(registration_id, assets_dir)
+                    if scenes:
+                        _clear_composed(display_dir)
+                        link_precomposed_into(scenes, display_dir)
+                        break
+                if len(sources) > 1:
+                    logger.info(f"No {source} slides for {registration_id} — trying the next source")
             link_videos_into(videos, display_dir)
         except Exception as e:
             logger.error(
@@ -1101,6 +1147,47 @@ class FaceRecognitionService(ServiceBase):
         # out from under the slideshow that is about to show them.
         self._enforce_asset_budget(protect={str(assets_dir)})
         return sketch_dir
+
+    def _scene_sources(self) -> list[str]:
+        """Scene sources to try, in order: the configured one, then (with the
+        fallback on) the other."""
+        primary = getattr(self.config, "scene_source", "compose")
+        if primary not in ("compose", "precomposed"):
+            primary = "compose"
+        other = "precomposed" if primary == "compose" else "compose"
+        return [primary, other] if getattr(self.config, "scene_source_fallback", True) else [primary]
+
+    def _fetch_assets(self, registration_id: str, assets_dir: Path, fetch_cutouts: bool) -> dict:
+        return fetch_person_assets(
+            self._http_client,
+            self.config.wpu_endpoint,
+            getattr(self.config, "sau_media_endpoint", ""),
+            registration_id,
+            getattr(self.config, "sau_cutout_filename", "sau_cutout.png"),
+            getattr(self.config, "fru_cutout_filename", "fru_cutout.png"),
+            int(getattr(self.config, "video_count", 1) or 0),
+            assets_dir,
+            fetch_cutouts=fetch_cutouts,
+        )
+
+    def _precomposed_scenes(self, registration_id: str, assets_dir: Path) -> list[Path]:
+        """This person's already-composed scenes, wherever this mode keeps them.
+
+        Diagnostic mode reads data/embeddings/<slug>/scenes/ and never touches
+        the server; base mode fetches the server's (cached in raw/scenes/).
+        """
+        if self._diagnostic_mode:
+            entry = self._gallery.get_entry(registration_id) if self._gallery else None
+            if entry is None or not entry.sketch_dir:
+                return []
+            scenes_dir = Path(entry.sketch_dir).parent / PRECOMPOSED_GALLERY_DIR
+            if not scenes_dir.is_dir():
+                return []
+            return sorted(p for p in scenes_dir.iterdir()
+                          if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES)
+        return fetch_precomposed_scenes(
+            self._http_client, self.config.wpu_endpoint, registration_id, assets_dir
+        )
 
     def _invalidate_duo_caches_for(self, registration_id: str) -> None:
         """Drop every cached duo pairing involving this person.
@@ -1126,6 +1213,12 @@ class FaceRecognitionService(ServiceBase):
         identified — nothing is refetched here. Videos are single-person
         only, so none are linked in.
         """
+        # Nobody pre-composes pairs, so a duo slide only ever comes from
+        # composing here. A unit configured never to compose (precomposed,
+        # no fallback) shows each person's own slides instead.
+        if "compose" not in self._scene_sources():
+            return None
+
         cutouts_a = self._cutouts_for(id_a)
         cutouts_b = self._cutouts_for(id_b)
 

@@ -46,6 +46,7 @@ caller knows to discard any slides it composed from the old copy.
 import json
 import logging
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -352,8 +353,13 @@ def fetch_person_assets(
     fru_filename: str,
     video_count: int,
     assets_dir: Path,
+    fetch_cutouts: bool = True,
 ) -> dict:
     """Best-effort fetch of this person's SAU/FRU cutouts + videos.
+
+    `fetch_cutouts=False` skips the cutouts (videos only) — for a unit showing
+    the server's pre-composed scenes, which has no use for them unless it
+    later falls back to composing.
 
     Downloads into `assets_dir/raw/`, cached via `assets_dir/manifest.json`.
     Never raises — every failure mode degrades to a None/absent entry.
@@ -379,20 +385,21 @@ def fetch_person_assets(
         manifest_path = assets_dir / MANIFEST_NAME
         manifest = _load_manifest(manifest_path)
 
-        cutout_urls = _fetch_cutout_urls(
-            http_client, wpu_endpoint, registration_id, sau_filename, fru_filename
-        )
         video_urls = _fetch_video_urls(
             http_client, sau_media_endpoint, registration_id, video_count
         )
 
-        for key, local_name in (("sau", SAU_LOCAL_NAME), ("fru", FRU_LOCAL_NAME)):
-            path, changed = _fetch_one(
-                http_client, cutout_urls[key], local_name, raw_dir, manifest, key,
+        if fetch_cutouts:
+            cutout_urls = _fetch_cutout_urls(
+                http_client, wpu_endpoint, registration_id, sau_filename, fru_filename
             )
-            result[key] = path
-            if changed:
-                result["changed"].add(key)
+            for key, local_name in (("sau", SAU_LOCAL_NAME), ("fru", FRU_LOCAL_NAME)):
+                path, changed = _fetch_one(
+                    http_client, cutout_urls[key], local_name, raw_dir, manifest, key,
+                )
+                result[key] = path
+                if changed:
+                    result["changed"].add(key)
 
         keep_video_names = set()
         for index, url in enumerate(video_urls, start=1):
@@ -434,6 +441,116 @@ def fetch_person_assets(
     return result
 
 
+def _place_file(src: Path, target: Path) -> bool:
+    """Hardlink `src` to `target` (copy if linking is impossible), replacing a
+    target that is not already the same file. Returns whether it is in place."""
+    try:
+        if target.exists():
+            s, t = src.stat(), target.stat()
+            # Same file, or an earlier fallback copy of it (copy2 keeps mtime).
+            if os.path.samefile(src, target) or (
+                s.st_size == t.st_size and int(s.st_mtime) == int(t.st_mtime)
+            ):
+                return True
+            target.unlink()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.link(src, target)
+        return True
+    except OSError:
+        try:
+            shutil.copy2(src, target)
+            return True
+        except OSError as e:
+            logger.warning(f"Could not place {src.name} in {target.parent}: {e}")
+            return False
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Pre-composed scenes — the alternative (and fallback) to composing on the Pi
+# ─────────────────────────────────────────────────────────────────────────
+
+# Server-fetched pre-composed scenes live in raw/scenes/ and are linked into
+# display/ under this prefix, so they can never be confused with — or
+# clobbered by — the slides the composer writes (sau_scene_* / fru_scene_*).
+PRECOMPOSED_DIR_NAME = "scenes"
+PRECOMPOSED_PREFIX = "pre_"
+IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
+_UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _scene_local_name(url: str) -> str | None:
+    """A safe local filename from a scene URL's path, or None if it isn't an image."""
+    name = _UNSAFE_NAME_CHARS.sub("_", os.path.basename(urlparse(url).path))
+    return name if name.lower().endswith(IMAGE_SUFFIXES) and not name.startswith(".") else None
+
+
+def fetch_precomposed_scenes(
+    http_client: HTTPClient, wpu_endpoint: str, registration_id: str, assets_dir: Path
+) -> list[Path]:
+    """Best-effort fetch of the server's pre-composed scenes for this person.
+
+    Read from the optional `scene_signed_urls` list on the same wpu_endpoint
+    listing the cutouts come from, downloaded into raw/scenes/ with the same
+    ETag/Last-Modified revalidation. Never raises.
+
+    A listing that came back WITHOUT scenes means the server has none, and
+    the cache is pruned to match; a listing that failed outright keeps the
+    cached scenes, so a network blip doesn't cost a visitor their slides.
+    """
+    scenes_dir = assets_dir / RAW_DIR_NAME / PRECOMPOSED_DIR_NAME
+    cached = sorted(p for p in scenes_dir.glob("*") if p.suffix.lower() in IMAGE_SUFFIXES) \
+        if scenes_dir.is_dir() else []
+    if not wpu_endpoint:
+        return cached
+    try:
+        data = _get_json(http_client, wpu_endpoint, params={"registration_id": registration_id})
+        if not data:
+            return cached
+
+        manifest_path = assets_dir / MANIFEST_NAME
+        manifest = _load_manifest(manifest_path)
+        fetched: list[Path] = []
+        for url in [u for u in (data.get("scene_signed_urls") or []) if isinstance(u, str)]:
+            name = _scene_local_name(url)
+            if name is None:
+                logger.warning(f"Ignoring pre-composed scene URL without an image name: {url[:80]}")
+                continue
+            path, _ = _fetch_one(http_client, url, name, scenes_dir, manifest,
+                                 f"{PRECOMPOSED_DIR_NAME}/{name}")
+            if path is not None:
+                fetched.append(path)
+
+        keep = {p.name for p in fetched}
+        for stale in cached:
+            if stale.name not in keep:
+                stale.unlink(missing_ok=True)
+                manifest.pop(f"{PRECOMPOSED_DIR_NAME}/{stale.name}", None)
+        _save_manifest(manifest_path, manifest)
+        logger.info(f"Pre-composed scenes for {registration_id}: {len(fetched)}")
+        return sorted(fetched)
+    except Exception as e:
+        logger.error(f"Pre-composed scene fetch failed for {registration_id}: {e}", exc_info=True)
+        return cached
+
+
+def link_precomposed_into(scenes: list[Path], display_dir: Path) -> int:
+    """Place pre-composed scenes in display/ as `pre_<name>`, replacing any
+    previous set. Returns how many are in place."""
+    clear_precomposed(display_dir, keep={f"{PRECOMPOSED_PREFIX}{s.name}" for s in scenes})
+    return sum(_place_file(s, display_dir / f"{PRECOMPOSED_PREFIX}{s.name}") for s in scenes)
+
+
+def clear_precomposed(display_dir: Path, keep: set[str] | None = None) -> None:
+    """Remove pre-composed scenes from display/ (all, or all but `keep`)."""
+    try:
+        for existing in display_dir.iterdir():
+            if (existing.is_file() and existing.name.startswith(PRECOMPOSED_PREFIX)
+                    and existing.name not in (keep or set())):
+                existing.unlink()
+    except OSError:
+        pass
+
+
 def link_videos_into(videos: list[Path], display_dir: Path) -> int:
     """Hardlink fetched videos into a person's display/ dir.
 
@@ -457,23 +574,7 @@ def link_videos_into(videos: list[Path], display_dir: Path) -> int:
     except OSError:
         pass
 
-    linked = 0
-    for video in videos:
-        target = display_dir / video.name
-        if target.exists():
-            linked += 1
-            continue
-        try:
-            display_dir.mkdir(parents=True, exist_ok=True)
-            os.link(video, target)
-            linked += 1
-        except OSError:
-            try:
-                shutil.copy2(video, target)
-                linked += 1
-            except OSError as e:
-                logger.warning(f"Could not place video {video.name} in {display_dir}: {e}")
-    return linked
+    return sum(_place_file(video, display_dir / video.name) for video in videos)
 
 
 # ─────────────────────────────────────────────────────────────────────────
