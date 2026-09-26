@@ -18,6 +18,7 @@ camera ──► YuNet detect ──► MobileFaceNet embed (512-D)
                                      │
                                      ▼
                     compose onto data/base_scenes/ backgrounds
+                    (or use pre-composed scenes)
                                      │
                                      ▼
                               slideshow displays
@@ -25,16 +26,24 @@ camera ──► YuNet detect ──► MobileFaceNet embed (512-D)
 
 Every visitor is stored as two transparent PNG cutouts — **SAU** (body) and
 **FRU** (face) — not as finished pictures. The Pi composes the finished slides
-itself, pasting those cutouts onto local scene backgrounds. One person in
-frame uses the `*_single` scenes; two recognised people together use the
-`*_duo` scenes.
+itself, pasting those cutouts onto local scene backgrounds, using the same
+placement rules as the server's image pipeline. One person in frame uses the
+`*_single` scenes; two recognised people together use the `*_duo` scenes.
+Ready-made scenes can be shown instead — see `scene_source` under
+[Modes](#modes).
 
 The two cutouts are placed by different mechanics and are never mixed into the
 same slide:
 
-- **SAU** — scaled and dropped onto a bottom-centre anchor (the anchor is where
-  the feet land).
-- **FRU** — warped onto an eye anchor (scale + rotate + translate).
+- **SAU** — sized by the visitor's real height (so the photo's resolution
+  doesn't matter), stood on a feet-line anchor, with a soft edge and a ground
+  shadow.
+- **FRU** — warped onto an eye anchor (scale + rotate + translate), with a thin
+  outline ring.
+
+The server embeds each cutout's placement data (canvas size, face landmarks)
+in the PNG itself, so the Pi never has to detect a face on a sketch. Cutouts
+without it still compose, with the canvas estimated and eyes found by YuNet.
 
 ## Requirements
 
