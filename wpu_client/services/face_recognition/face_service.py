@@ -781,7 +781,10 @@ class FaceRecognitionService(ServiceBase):
         # their SAU/FRU cutouts onto data/base_scenes/, so sketch_dir is
         # already populated on the tracked entry for the duo path and the
         # single-person fallback alike.
-        sketch_dir = self._ensure_single_assets(match.entry.slug, match.entry.gender)
+        # Height comes from the gallery's meta.json here, as it comes from the
+        # identify response in base mode; absent means the scene default.
+        height_cm = match.entry.meta.get("height_cm") if match.entry.meta else None
+        sketch_dir = self._ensure_single_assets(match.entry.slug, match.entry.gender, height_cm)
         entry = self._track_new_face(
             registration_id=match.entry.slug,
             face_vector=face_vector,
@@ -791,6 +794,7 @@ class FaceRecognitionService(ServiceBase):
             sketch_dir=sketch_dir,
             bbox_area=bbox_area,
             gender=match.entry.gender,
+            height_cm=height_cm,
         )
         self._save_dataset_frame_for(entry, frame, distance=match.distance)
         return True
@@ -859,7 +863,9 @@ class FaceRecognitionService(ServiceBase):
             # sketch_dir is already populated on the tracked entry — the duo
             # path and the single-person fallback both read it from there
             # rather than recomposing.
-            sketch_dir = self._ensure_single_assets(response.registration_id, gender)
+            sketch_dir = self._ensure_single_assets(
+                response.registration_id, gender, response.height_cm
+            )
 
             entry = self._track_new_face(
                 registration_id=response.registration_id,
@@ -870,6 +876,7 @@ class FaceRecognitionService(ServiceBase):
                 sketch_dir=sketch_dir,
                 bbox_area=bbox_area,
                 gender=gender,
+                height_cm=response.height_cm,
             )
             self._save_dataset_frame_for(entry, frame, distance=response.distance or 0.0)
 
@@ -914,6 +921,7 @@ class FaceRecognitionService(ServiceBase):
         bbox_area: float = 0.0,
         unrecognized: bool = False,
         gender: Optional[str] = None,
+        height_cm: Optional[float] = None,
     ) -> dict:
         """Start tracking a newly-identified face under its own registration_id."""
         with self._person_lock:
@@ -927,6 +935,8 @@ class FaceRecognitionService(ServiceBase):
                 # Carried so duo composition can gender-filter scenes later
                 # without re-querying the server.
                 "gender": gender,
+                # Likewise for duo body scaling.
+                "height_cm": height_cm,
                 "unrecognized": unrecognized,
                 # Flips to True the first time the overlay shows this
                 # person — that first line is a one-time "Welcome!", every
@@ -1003,7 +1013,7 @@ class FaceRecognitionService(ServiceBase):
             return False
 
     def _ensure_single_assets(
-        self, registration_id: str, gender: Optional[str]
+        self, registration_id: str, gender: Optional[str], height_cm: Optional[float] = None
     ) -> Optional[str]:
         """Obtain + compose this person's own slides, returning their display dir.
 
@@ -1065,6 +1075,7 @@ class FaceRecognitionService(ServiceBase):
 
             compose_single_body(
                 cutouts["sau"], SAU_SINGLE_DIR, SAU_SINGLE_CONFIG_PATH, display_dir,
+                height_cm=height_cm,
             )
             compose_single_face(
                 self._yunet_detector, cutouts["fru"], gender,
@@ -1124,6 +1135,7 @@ class FaceRecognitionService(ServiceBase):
             compose_duo_body(
                 cutouts_a["sau"], cutouts_b["sau"],
                 SAU_DUO_DIR, SAU_DUO_CONFIG_PATH, output_dir,
+                height_a=entry_a.get("height_cm"), height_b=entry_b.get("height_cm"),
             )
         if cutouts_a["fru"] and cutouts_b["fru"]:
             compose_duo_face(

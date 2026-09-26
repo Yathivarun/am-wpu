@@ -1,7 +1,9 @@
 """API models for face recognition requests and responses."""
 
 
-from pydantic import BaseModel, Field
+import math
+
+from pydantic import BaseModel, Field, field_validator
 
 
 class IdentifyRequest(BaseModel):
@@ -58,6 +60,20 @@ class IdentifyResponse(BaseModel):
     # mode). Optional on purpose: servers that don't return it yet leave it
     # None, and a None gender never excludes a scene.
     gender: str | None = None
+    # Real-world height, for scaling the body onto scenes. Optional on purpose:
+    # absent (older servers) or unusable, it is None and composition falls
+    # back to each scene's reference height. Never allowed to fail the
+    # identification itself.
+    height_cm: float | None = None
+
+    @field_validator("height_cm", mode="before")
+    @classmethod
+    def _lenient_height(cls, value):
+        try:
+            height = float(value)
+        except (TypeError, ValueError):
+            return None
+        return height if math.isfinite(height) and height > 0 else None
 
     @property
     def person_name(self) -> str:

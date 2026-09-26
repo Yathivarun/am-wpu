@@ -1,3 +1,5 @@
+import pytest
+
 from wpu_client.models.api import IdentifyRequest, IdentifyResponse, WPULImagesResponse
 
 
@@ -32,3 +34,27 @@ def test_identify_response_person_name_falls_back_to_unknown():
 def test_wpu_images_response_has_images():
     assert WPULImagesResponse(signed_urls=["https://example.com/a.png"]).has_images is True
     assert WPULImagesResponse().has_images is False
+
+
+# ── height_cm (body scaling) ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (172, 172.0),
+        ("165.5", 165.5),
+        (None, None),
+        ("tall", None),     # garbage never fails identification
+        (-3, None),
+        (0, None),
+        (float("nan"), None),
+    ],
+)
+def test_identify_height_is_lenient(raw, expected):
+    resp = IdentifyResponse(registration_id="r", name="n", height_cm=raw)
+    assert resp.height_cm == expected
+
+
+def test_identify_height_is_optional():
+    assert IdentifyResponse(registration_id="r", name="n").height_cm is None
