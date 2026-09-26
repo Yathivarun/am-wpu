@@ -199,49 +199,23 @@ class _GstVideoPlayer:
         self.pipeline = None
 
 
-def visitor_image_source(
-    sketch_dir: Optional[str],
-    diagnostic_mode: bool,
-    use_legacy_final_images: bool,
-    unrecognized: bool = False,
-) -> str:
-    """Where a visitor's slides should come from: "local", "server" or "none".
+def visitor_image_source(sketch_dir: Optional[str]) -> str:
+    """Where a visitor's slides come from: "local" or "none".
 
-    Asset-driven rather than mode-driven: whenever locally-composed slides
-    exist for this person, they win. That covers diagnostic mode (sketch_dir
-    set on a gallery match) and base mode (sketch_dir populated by local
-    SAU/FRU composition).
+    Every mode resolves a person's slides BEFORE the slideshow sees them, into
+    one local display/ directory: composed on the Pi, or pre-composed scenes
+    fetched from the server (base mode) / read from the gallery (diagnostic
+    mode) — see scene_source in FaceRecognitionConfig. So the only question
+    left here is whether that directory exists; with nothing there the
+    display stays on stock images.
 
-    Two rules override that:
-
-    * `use_legacy_final_images` is the rollback valve — it must force the
-      server path even when local slides exist, or flipping it would do
-      nothing.
-    * Diagnostic mode is OFFLINE by definition and must never reach for the
-      server, not even as a fallback. The common way to end up with no local
-      slides there is an unrecognized face, whose sketch_dir is always None;
-      falling through to the server would fire on every unknown visitor and
-      stall the calling (recognition) thread for timeout x max_retries with
-      nothing to show for it.
-    * An unrecognized face has no registration at all — it is tracked under a
-      generated "__unrecognized__<hex>" pseudo-id, which no endpoint can ever
-      resolve. Asking anyway is a guaranteed-failing round trip on the
-      recognition thread, and the server answers it with a 500 (the pseudo-id
-      isn't a UUID), so it also fills the server's logs with false alarms.
-      This applies in base mode too, not just diagnostic.
+    Nothing on this path touches the server. That keeps the guarantees the
+    old display-time fetch had to special-case: diagnostic mode stays
+    offline, an unrecognized face (tracked under an unresolvable
+    "__unrecognized__<hex>" pseudo-id) never triggers a doomed request, and
+    the recognition thread this runs on is never stalled by one.
     """
-    has_local = bool(sketch_dir) and os.path.isdir(sketch_dir)
-    if diagnostic_mode:
-        return "local" if has_local and not use_legacy_final_images else "none"
-    if unrecognized:
-        # Never the server: there is nothing there under a pseudo-id. Local
-        # slides are still honoured if something ever assigns them.
-        return "local" if has_local else "none"
-    if use_legacy_final_images:
-        return "server"
-    if has_local:
-        return "local"
-    return "server"
+    return "local" if sketch_dir and os.path.isdir(sketch_dir) else "none"
 
 
 def _video_suffixes(config) -> tuple[str, ...]:
@@ -275,33 +249,24 @@ class SlideshowService(ServiceBase):
     - Visitor images mode: Slideshow of visitor-specific WPU images
     """
 
-    def __init__(self, config: SlideshowConfig, event_bus: EventBus, wpu_endpoint: str,
-                 face_service=None, diagnostic_mode: bool = False,
-                 use_legacy_final_images: bool = False):
+    def __init__(self, config: SlideshowConfig, event_bus: EventBus,
+                 face_service=None, diagnostic_mode: bool = False):
         """
         Initialize the slideshow service.
 
         Args:
             config: Slideshow configuration
             event_bus: Event bus for inter-service communication
-            wpu_endpoint: WPU API endpoint for fetching visitor images
             face_service: Optional FaceRecognitionService for camera preview
-            diagnostic_mode: If True, show the matched person's own local sketches
-                (data/embeddings/<slug>/sketches/) on recognition instead of
-                fetching visitor images from the server.
-            use_legacy_final_images: Rollback valve. If True, always fetch the
-                server's pre-composed final images and ignore locally-composed
-                slides. Lives on the face_recognition config (it describes what
-                wpu_endpoint is expected to serve) and is passed in here, the
-                same way diagnostic_mode is.
+            diagnostic_mode: Whether face recognition runs against the local
+                gallery. Visitor slides are prepared by the face service in
+                every mode (see visitor_image_source); kept for callers.
         """
         super().__init__("slideshow")
         self.config = config
         self.event_bus = event_bus
-        self.wpu_endpoint = wpu_endpoint
         self.face_service = face_service  # used for bottom-left camera preview
         self.diagnostic_mode = diagnostic_mode
-        self.use_legacy_final_images = use_legacy_final_images
         self._app: Optional[SlideshowApp] = None
         self._overlay_text: Optional[str] = None
         self._overlay_hide_time: float = 0
@@ -333,7 +298,7 @@ class SlideshowService(ServiceBase):
         self._http_client = HTTPClient(timeout=10.0, max_retries=3)
 
         # Run GTK app in main thread
-        self._app = SlideshowApp(self.config, self, self.wpu_endpoint, self._http_client, self.face_service)
+        self._app = SlideshowApp(self.config, self, self._http_client, self.face_service)
         self._app.run(None)
 
     def stop(self) -> None:
@@ -921,11 +886,10 @@ class SlideshowApp(Gtk.Application):
     Manages switching between stock and visitor image modes.
     """
 
-    def __init__(self, config, service, wpu_endpoint, http_client, face_service=None):
+    def __init__(self, config, service, http_client, face_service=None):
         super().__init__(application_id="com.wpu_client.slideshow")
         self.config = config
         self.service = service
-        self.wpu_endpoint = wpu_endpoint
         self.http_client = http_client
         self.face_service = face_service
         self.stock_images = self._load_stock_images()
@@ -961,29 +925,6 @@ class SlideshowApp(Gtk.Application):
             f"({video_count} video(s))"
         )
         return image_files
-
-    def _fetch_visitor_images(self, registration_id: str) -> list[str]:
-        """Fetch visitor WPU images from the API.
-
-        Single attempt, never raises. This runs synchronously on the
-        recognition thread (the person.detected handler), so retrying a
-        failure would stall detection for timeout x max_retries while the
-        visitor is still standing there — and the overwhelmingly common
-        failure is a definitive one (no images for this registration) that
-        no amount of retrying will change.
-        """
-        logger.info(f"Fetching WPU images for registration_id: {registration_id}")
-        response_data = self.http_client.get_json_once(
-            self.wpu_endpoint, params={"registration_id": registration_id}
-        )
-        if not response_data:
-            logger.info(f"No WPU images available for visit {registration_id}")
-            return []
-
-        # The API returns a dict with "signed_urls" key containing list of URLs
-        images = response_data.get("signed_urls", [])
-        logger.info(f"Fetched {len(images)} WPU images for visit {registration_id}")
-        return images
 
     def _load_person_sketches(self, sketch_dir: str) -> list[str]:
         """This person's locally-available slides, images and videos together.
@@ -1023,23 +964,11 @@ class SlideshowApp(Gtk.Application):
             f"(registration_id: {registration_id}, sketches: {sketch_dir})"
         )
 
-        # See visitor_image_source() for the full policy, including why
-        # diagnostic mode must never fall through to the server.
-        source = visitor_image_source(
-            sketch_dir,
-            self.service.diagnostic_mode,
-            self.service.use_legacy_final_images,
-            unrecognized=unrecognized,
-        )
-        if source == "local":
+        # See visitor_image_source() for the full policy.
+        if visitor_image_source(sketch_dir) == "local":
             visitor_images = self._load_person_sketches(sketch_dir)
-        elif source == "server":
-            visitor_images = self._fetch_visitor_images(registration_id)
         else:
-            logger.info(
-                f"No local slides for {person_name} and the server is not an "
-                f"option in this mode — staying on stock images"
-            )
+            logger.info(f"No slides prepared for {person_name} — staying on stock images")
             visitor_images = []
 
         if not visitor_images:
