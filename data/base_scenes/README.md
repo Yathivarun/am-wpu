@@ -73,9 +73,21 @@ starts earning its keep once scenes are named for what they show.
 "1": { "name": "1", "scale": 0.3922, "anchor": [936, 2539] }
 ```
 
-- `scale` — multiplier applied to the cutout before pasting.
-- `anchor` — `[x, y]` in scene pixels marking where the subject's **feet** land.
-  The resized cutout is centred horizontally on `x`, with its **bottom edge** at `y`.
+- `scale` — on-scene size, calibrated against a reference person: the subject's
+  **canvas** (the postprocessed sketch, including its ~5% padding) is drawn
+  `scale × 3941 px` tall for a person of the reference height. The photo's own
+  resolution and crop cancel out, so every visitor of the same height renders at
+  the same size — this matches the server's scene composition exactly.
+- `anchor` — `[x, y]` in scene pixels marking the **feet line**. The scaled
+  canvas is centred horizontally on `x`, with its **bottom edge** at `y` (so the
+  feet sit just above it, by the canvas padding — as on the server).
+- `height_cm` *(optional, default 170)* — the reference height `scale` was
+  calibrated for. Each visitor is scaled by `their height / height_cm`; their
+  height comes from the identify response (`height_cm`) in base mode or
+  `meta.json` in diagnostic mode, and falls back to the reference when unknown.
+
+Each body also gets a soft ground shadow under the feet line, and the mask edge
+is softened — both tuned in `base_composer.py` to mirror the server's config.
 
 An anchor may legitimately fall outside the scene: the example above sits at
 `y = 2539` on a 2240px-tall background, deliberately cropping the feet. The
@@ -103,10 +115,15 @@ A duo scene is only written when **both** people can be placed.
 - `target_eye_distance` — pixel distance between the eyes after warping; this is
   what sets the apparent face size.
 - `target_tilt_angle` — degrees of head tilt, `0` for upright.
+- `target_head_height` *(optional)* — on-scene head height in pixels. When set,
+  it sizes the face instead of `target_eye_distance` (eyes still set position
+  and tilt).
 
-Placement is driven entirely by the eyes, detected in the cutout with the same
-YuNet model the recognition loop already has loaded. A cutout with no detectable
-eyes composes no face slides.
+Placement is driven by the eyes. The server embeds each face cutout's
+landmarks and face box in the PNG itself (see `png_meta.py`), so nothing is
+detected on the Pi; only cutouts without that metadata fall back to YuNet
+detection on the sketch, and one with no detectable eyes composes no face
+slides. A thin outline ring is drawn around the face at on-scene scale.
 
 ### `gender`
 
@@ -155,3 +172,8 @@ data/diagnostic_assets/duo/<slug_a>__<slug_b>/display/...
 Each root is size-capped by `base_assets_max_bytes` and LRU-evicted, duo pairs
 first. Deleting either is always safe — everything in them is regenerable, and
 that is also how you force a recompose after retuning anchors.
+
+Each display dir also holds a small `.sau_scene_stamp.json` /
+`.fru_scene_stamp.json` recording the compositor version (and, for bodies, the
+heights used). Slides whose stamp doesn't match — composed by an older build or
+for a different height — are deleted and recomposed automatically.
