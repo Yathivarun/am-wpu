@@ -102,6 +102,12 @@ class _GstVideoPlayer:
     via a mute flag on a player that might still expose an audio sink.
     """
 
+    # A frame more than this late is dropped, and QoS tells the decoder to
+    # skip ahead, so a Pi that can't keep up plays at real speed with fewer
+    # frames instead of in slow motion. appsink defaults to qos=false and
+    # unlimited lateness — nothing was ever dropped before.
+    MAX_LATENESS_NS = 20_000_000  # 20 ms, the usual video-sink value
+
     def __init__(self, path: str, picture: Gtk.Picture, on_eos, on_error, on_duration=None):
         _ensure_gst_init()
         self.picture = picture
@@ -111,17 +117,37 @@ class _GstVideoPlayer:
         self._duration_reported = False
         self._stopped = False
 
+        # Newest decoded frame waiting to be shown, and whether a main-loop
+        # callback is already scheduled to show it. At most one texture is
+        # ever queued: if the main loop falls behind, older frames are
+        # replaced rather than piled up (8 MB each at 1080p) and replayed
+        # in a burst.
+        self._frame_lock = threading.Lock()
+        self._pending_texture = None
+        self._present_scheduled = False
+
         # decodebin has dynamic ("Sometimes") pads, but Gst.parse_launch
         # supports the `decodebin ! nextelement` idiom directly: it auto-links
-        # decodebin's video pad to videoconvert once caps are known. Any
+        # decodebin's video pad to the next element once caps are known. Any
         # audio pad is left unlinked (see docstring) rather than silently
-        # played.
+        # played. The queue puts decoding and colour conversion on separate
+        # threads so they overlap.
         pipeline_str = (
-            f'filesrc location="{path}" ! decodebin ! videoconvert ! '
+            f'filesrc location="{path}" ! decodebin ! queue max-size-buffers=4 ! '
+            f'videoconvert name=convert ! '
             f'appsink name=sink caps="video/x-raw,format=RGBA" sync=true '
-            f'max-buffers=2 drop=true'
+            f'qos=true max-lateness={self.MAX_LATENESS_NS} max-buffers=1 drop=true'
         )
         self.pipeline = Gst.parse_launch(pipeline_str)
+
+        # RGBA conversion is single-threaded by default and is one of the
+        # biggest per-frame costs; use every core. The property only exists
+        # on GStreamer >= 1.20, so set it here rather than in the launch
+        # string, where an unknown property would fail the whole pipeline.
+        convert = self.pipeline.get_by_name("convert")
+        if convert is not None and convert.find_property("n-threads") is not None:
+            convert.set_property("n-threads", 0)
+
         self.appsink = self.pipeline.get_by_name("sink")
         self.appsink.set_property("emit-signals", True)
         self._new_sample_id = self.appsink.connect("new-sample", self._on_new_sample)
@@ -132,12 +158,24 @@ class _GstVideoPlayer:
 
         self.pipeline.set_state(Gst.State.PLAYING)
 
+    def _call_if_live(self, callback, *args) -> bool:
+        """Main-loop trampoline: run `callback` only if this player hasn't been
+        stopped. Callbacks are queued from other threads and can run after the
+        slide has moved on; a stale EOS would skip the next slide, and a stale
+        duration would cancel the next slide's advance timer and stall the
+        slideshow."""
+        if not self._stopped:
+            callback(*args)
+        return False
+
     def _on_new_sample(self, sink):
         """Runs on the GStreamer streaming thread, NOT the GTK main thread —
-        every touch of self.picture must go through GLib.idle_add."""
+        the texture is handed to _present() on the main loop."""
         sample = sink.emit("pull-sample")
         if not sample:
             return Gst.FlowReturn.ERROR
+        if self._stopped:
+            return Gst.FlowReturn.OK
 
         buf = sample.get_buffer()
         caps = sample.get_caps()
@@ -153,18 +191,36 @@ class _GstVideoPlayer:
                     width, height, Gdk.MemoryFormat.R8G8B8A8,
                     frame_bytes, width * 4,
                 )
-                GLib.idle_add(self.picture.set_paintable, texture)
             finally:
                 buf.unmap(info)
+            with self._frame_lock:
+                self._pending_texture = texture
+                schedule = not self._present_scheduled
+                self._present_scheduled = True
+            if schedule:
+                # Ahead of GTK's redraw (priority 120), so a frame decoded
+                # before the next paint is shown in it; ahead of the 100 ms
+                # overlay/preview timers' default priority as well.
+                GLib.idle_add(self._present, priority=GLib.PRIORITY_HIGH_IDLE)
 
         if not self._duration_reported and self._on_duration is not None:
             ok, duration_ns = self.pipeline.query_duration(Gst.Format.TIME)
             if ok and duration_ns > 0:
                 self._duration_reported = True
                 duration_s = duration_ns / Gst.SECOND
-                GLib.idle_add(self._on_duration, duration_s)
+                GLib.idle_add(self._call_if_live, self._on_duration, duration_s)
 
         return Gst.FlowReturn.OK
+
+    def _present(self) -> bool:
+        """Main loop: show the newest pending frame, if the player is live."""
+        with self._frame_lock:
+            texture = self._pending_texture
+            self._pending_texture = None
+            self._present_scheduled = False
+        if texture is not None and not self._stopped:
+            self.picture.set_paintable(texture)
+        return False
 
     def _on_bus_message(self, bus, message):
         """Bus watch callbacks already run on the main loop's context, but we
@@ -173,18 +229,22 @@ class _GstVideoPlayer:
             return True
         t = message.type
         if t == Gst.MessageType.EOS:
-            GLib.idle_add(self._on_eos)
+            GLib.idle_add(self._call_if_live, self._on_eos)
         elif t == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            GLib.idle_add(self._on_error, err, debug)
+            GLib.idle_add(self._call_if_live, self._on_error, err, debug)
         return True
 
     def stop(self) -> None:
         """Tear down the pipeline and bus watch. Safe to call more than once
-        (load_image() calls this on every slide transition)."""
+        (load_image() calls this on every slide transition). Any frame or
+        callback still queued on the main loop is discarded, so nothing from
+        this video can land on the slide that replaces it."""
         if self._stopped or self.pipeline is None:
             return
         self._stopped = True
+        with self._frame_lock:
+            self._pending_texture = None
         try:
             self.appsink.disconnect(self._new_sample_id)
         except Exception:
@@ -834,6 +894,12 @@ class SlideshowWindow(Gtk.ApplicationWindow):
         face_service = getattr(self.service, "face_service", None)
         if face_service is None:
             return True  # No face service wired up — skip silently
+        if self._current_media is not None:
+            # A video is playing. Converting a camera frame here every 100 ms
+            # competes with its frames for the main loop, and the preview is
+            # just a small corner overlay — hold its last frame until the
+            # video ends.
+            return True
 
         frame = face_service.get_preview_frame(max_size=self.preview_size)
         if frame is None:
