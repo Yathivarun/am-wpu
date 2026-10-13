@@ -1,38 +1,44 @@
 {
   "1": {
     "name": "Statue of Basavanna",
-    "scale": 0.2808,
-    "anchor": [1215, 2597]
+    "scale": 0.21,
+    "anchor": [1215, 2540],
+    "height_cm": 170
   },
   "2": {
     "name": "Inside Temple - Basavanna statue",
-    "scale": 0.1900,
-    "anchor": [1588, 2078]
+    "scale": 0.18,
+    "anchor": [1600, 2089],
+    "height_cm": 170
   },
   "3": {
     "name": "Outside Anubhava Mantapa",
-    "scale": 0.3059,
-    "anchor": [1497, 2562]
+    "scale": 0.25,
+    "anchor": [1497, 2562],
+    "height_cm": 170
   },
   "4": {
     "name": "Meeting place of Basavanna and other saints",
-
-    "scale": 0.2557,
-    "anchor": [1291, 2340]
+    "scale": 0.23,
+    "anchor": [1291, 2340],
+    "height_cm": 170
   },
   "5": {
     "name": "Balcony of Fantasy Basavakalyan",
-    "scale": 0.3491,
-    "anchor": [1189, 2585]
+    "scale": 0.35,
+    "anchor": [1189, 2585],
+    "height_cm": 170
   },
   "6": {
     "name": "Basavakalyan Street",
-    "scale": 0.3042,
-    "anchor": [1205, 2591]
+    "scale": 0.31,
+    "anchor": [1225, 2591],
+    "height_cm": 170
   },
   "7": {
     "name": "Saints Meeting Ground",
-    "scale": 0.2887,
-    "anchor": [1941, 2089]
+    "scale": 0.29,
+    "anchor": [1941, 2089],
+    "height_cm": 170
   }
 }

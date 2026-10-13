@@ -3,12 +3,12 @@
     "name": "2 Horse Riders",
     "gender": ["male"],
     "face_anchor_1": {
-      "target_eye_midpoint": [781, 523],
-      "target_eye_distance": 66,
+      "target_eye_midpoint": [781, 526],
+      "target_eye_distance": 64,
       "target_tilt_angle": -2
     },
     "face_anchor_2": {
-      "target_eye_midpoint": [1500, 557],
+      "target_eye_midpoint": [1505, 560],
       "target_eye_distance": 66,
       "target_tilt_angle": -1
     }
@@ -17,13 +17,13 @@
     "name": "2 Meditators",
     "gender": ["male"],
     "face_anchor_1": {
-      "target_eye_midpoint": [703, 1075],
-      "target_eye_distance": 92,
+      "target_eye_midpoint": [703, 1071],
+      "target_eye_distance": 90,
       "target_tilt_angle": 0
     },
     "face_anchor_2": {
-      "target_eye_midpoint": [1662, 1082],
-      "target_eye_distance": 90,
+      "target_eye_midpoint": [1662, 1080],
+      "target_eye_distance": 88,
       "target_tilt_angle": 0
     }
   },
@@ -31,12 +31,12 @@
     "name": "2 Female Dancers",
     "gender": ["female"],
     "face_anchor_1": {
-      "target_eye_midpoint": [851, 690],
+      "target_eye_midpoint": [851, 685],
       "target_eye_distance": 80,
       "target_tilt_angle": 2
     },
     "face_anchor_2": {
-      "target_eye_midpoint": [1533, 746],
+      "target_eye_midpoint": [1533, 743],
       "target_eye_distance": 80,
       "target_tilt_angle": -2
     }
@@ -46,13 +46,15 @@
     "gender": ["mixed"],
     "face_anchor_1": {
       "target_eye_midpoint": [860, 615],
-      "target_eye_distance": 90,
-      "target_tilt_angle": 0
+      "target_eye_distance": 89,
+      "target_tilt_angle": 0,
+      "gender": "male"
     },
     "face_anchor_2": {
-      "target_eye_midpoint": [1533, 746],
+      "target_eye_midpoint": [1533, 743],
       "target_eye_distance": 80,
-      "target_tilt_angle": -2
+      "target_tilt_angle": -2,
+      "gender": "female"
     }
   }
 }

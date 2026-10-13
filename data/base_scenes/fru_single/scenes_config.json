@@ -3,8 +3,8 @@
     "name": "Horse Rider",
     "gender": ["male"],
     "face_anchor": {
-      "target_eye_midpoint": [1120, 649],
-      "target_eye_distance": 57,
+      "target_eye_midpoint": [1124, 650],
+      "target_eye_distance": 55,
       "target_tilt_angle": 0
     }
   },
@@ -12,7 +12,7 @@
     "name": "Meditator",
     "gender": ["male"],
     "face_anchor": {
-      "target_eye_midpoint": [1187, 920],
+      "target_eye_midpoint": [1187, 916],
       "target_eye_distance": 103,
       "target_tilt_angle": 0
     }
@@ -21,8 +21,8 @@
     "name": "Scholar",
     "gender": ["male"],
     "face_anchor": {
-      "target_eye_midpoint": [1181, 824],
-      "target_eye_distance": 83,
+      "target_eye_midpoint": [1181, 826],
+      "target_eye_distance": 80,
       "target_tilt_angle": 3
     }
   },
@@ -31,7 +31,7 @@
     "gender": ["male"],
     "face_anchor": {
       "target_eye_midpoint": [1085, 930],
-      "target_eye_distance": 42,
+      "target_eye_distance": 41,
       "target_tilt_angle": 0
     }
   },
@@ -40,7 +40,7 @@
     "gender": ["male"],
     "face_anchor": {
       "target_eye_midpoint": [1161, 625],
-      "target_eye_distance": 87,
+      "target_eye_distance": 86,
       "target_tilt_angle": 2
     }
   },
@@ -48,8 +48,8 @@
     "name": "Dancer",
     "gender": ["female"],
     "face_anchor": {
-      "target_eye_midpoint": [1166, 522],
-      "target_eye_distance": 91,
+      "target_eye_midpoint": [1166, 518],
+      "target_eye_distance": 92,
       "target_tilt_angle": -3
     }
   },
@@ -57,7 +57,7 @@
     "name": "Princess in Palace",
     "gender": ["female"],
     "face_anchor": {
-      "target_eye_midpoint": [1161, 818],
+      "target_eye_midpoint": [1161, 815],
       "target_eye_distance": 64,
       "target_tilt_angle": 0
     }
@@ -66,7 +66,7 @@
     "name": "Female Sword Warrior",
     "gender": ["female"],
     "face_anchor": {
-      "target_eye_midpoint": [1177, 804],
+      "target_eye_midpoint": [1177, 802],
       "target_eye_distance": 62,
       "target_tilt_angle": 0
     }
@@ -75,8 +75,8 @@
     "name": "Female Horse Rider",
     "gender": ["female"],
     "face_anchor": {
-      "target_eye_midpoint": [1152, 790],
-      "target_eye_distance": 48,
+      "target_eye_midpoint": [1155, 790],
+      "target_eye_distance": 50,
       "target_tilt_angle": -2
     }
   },
@@ -84,8 +84,8 @@
     "name": "Meditator",
     "gender": ["female"],
     "face_anchor": {
-      "target_eye_midpoint": [1176, 817],
-      "target_eye_distance": 107,
+      "target_eye_midpoint": [1176, 815],
+      "target_eye_distance": 109,
       "target_tilt_angle": 0
     }
   }

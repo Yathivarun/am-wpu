@@ -1,37 +1,42 @@
 {
   "1": {
     "name": "Statue of Basavanna",
-    "scale_1": 0.2808,
-    "anchor_1": [965, 2597],
-    "scale_2": 0.2088,
-    "anchor_2": [1465, 2597]
+    "scale_1": 0.22,
+    "anchor_1": [1060, 2540],
+    "scale_2": 0.22,
+    "anchor_2": [1350, 2540],
+    "height_cm": 170
   },
   "2": {
     "name": "Inside Temple - Basavanna statue",
-    "scale_1": 0.1900,
-    "anchor_1": [1338, 2078],
-    "scale_2": 0.1900,
-    "anchor_2": [1838, 2078]
+    "scale_1": 0.18,
+    "anchor_1": [1600, 2089],
+    "scale_2": 0.18,
+    "anchor_2": [760, 2089],
+    "height_cm": 170
   },
   "4": {
     "name": "Meeting place of Basavanna and other saints",
-    "scale_1": 0.2557,
-    "anchor_1": [1041, 2340],
-    "scale_2": 0.2557,
-    "anchor_2": [1541, 2340]
+    "scale_1": 0.27,
+    "anchor_1": [1014, 2646],
+    "scale_2": 0.27,
+    "anchor_2": [1380, 2646],
+    "height_cm": 170
   },
   "5": {
     "name": "Balcony of Fantasy Basavakalyan",
-    "scale_1": 0.3491,
-    "anchor_1": [939, 2585],
-    "scale_2": 0.3491,
-    "anchor_2": [1439, 2585]
+    "scale_1": 0.35,
+    "anchor_1": [959, 2585],
+    "scale_2": 0.35,
+    "anchor_2": [1419, 2585],
+    "height_cm": 170
   },
   "6": {
     "name": "Basavakalyan Street",
-    "scale_1": 0.3042,
-    "anchor_1": [955, 2591],
-    "scale_2": 0.3042,
-    "anchor_2": [1455, 2591]
+    "scale_1": 0.31,
+    "anchor_1": [975, 2591],
+    "scale_2": 0.31,
+    "anchor_2": [1435, 2591],
+    "height_cm": 170
   }
 }
