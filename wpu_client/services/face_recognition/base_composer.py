@@ -863,6 +863,15 @@ def compose_duo_face(
         if anchor_a is None or anchor_b is None:
             continue
 
+        # The pair arrives in slug order, not by gender. In a mixed scene an
+        # anchor may name the gender its figure is drawn as; swap the two
+        # people when they arrive the wrong way round for it.
+        pair = ((face_a, kps_a), (face_b, kps_b))
+        want = str(anchor_a.get("gender") or "").lower()
+        ga, gb = (gender_a or "").lower(), (gender_b or "").lower()
+        if want and ga and gb and ga != gb and ga != want:
+            pair = pair[::-1]
+
         scene_file = find_scene_file(scenes_dir, scene_id)
         if scene_file is None:
             continue
@@ -872,7 +881,7 @@ def compose_duo_face(
 
         try:
             placed = [place_face(scene, face, kps, anchor)
-                      for face, kps, anchor in ((face_a, kps_a, anchor_a), (face_b, kps_b, anchor_b))]
+                      for (face, kps), anchor in zip(pair, (anchor_a, anchor_b), strict=True)]
         except (KeyError, TypeError, ValueError) as e:
             logger.warning(f"Base duo face compose: bad anchor for scene {scene_id}: {e}")
             continue

@@ -606,3 +606,43 @@ def test_scene_label_falls_back_to_the_id():
     assert scene_label("4", {}) == "4"
     assert scene_label("4", {"name": "4"}) == "4"
     assert scene_label("4", {"name": "Winter Market"}) == "4 (Winter Market)"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Duo face: mixed pairs land on the figure drawn as their gender
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _duo_face_slide(tmp_path, first, second, anchor_genders=("male", "female")):
+    """Compose (first, second) — each "male" or "female" — onto one mixed scene
+    whose left figure is anchor_genders[0]; return the slide."""
+    left, right = _anchor(mid=(100, 150), dist=40), _anchor(mid=(300, 150), dist=40)
+    if anchor_genders:
+        left["gender"], right["gender"] = anchor_genders
+    scenes_dir, config_path = _write_scenes(
+        tmp_path, {"4": {"gender": ["mixed"], "face_anchor_1": left, "face_anchor_2": right}}, "fru_duo")
+    paths = []
+    for i, gender in enumerate((first, second)):
+        cut = _face_cutout()
+        bgra = cut.bgra.copy()
+        if gender == "female":            # female face red, male stays blue
+            bgra[:, :, 0], bgra[:, :, 2] = bgra[:, :, 2].copy(), 255
+        paths.append(_write_cutout(tmp_path / f"fru_{i}.png", bgra, cut.geometry))
+    out = tmp_path / "display"
+    assert bc.compose_duo_face(None, paths[0], paths[1], first, second, scenes_dir, config_path, out)
+    return cv2.imread(str(out / f"{FACE_PREFIX}4.jpg"))
+
+
+def _is_blue(px):
+    return px[0] > 180 and px[2] < 100
+
+
+@pytest.mark.parametrize("order", [("male", "female"), ("female", "male")])
+def test_duo_face_mixed_pair_follows_anchor_gender_whatever_the_slug_order(tmp_path, order):
+    slide = _duo_face_slide(tmp_path, *order)
+    assert _is_blue(slide[180, 100]) and not _is_blue(slide[180, 300])   # man left, woman right
+
+
+def test_duo_face_without_anchor_gender_keeps_slug_order(tmp_path):
+    slide = _duo_face_slide(tmp_path, "female", "male", anchor_genders=None)
+    assert not _is_blue(slide[180, 100]) and _is_blue(slide[180, 300])
