@@ -33,7 +33,7 @@ trap 'rm -f wpu_client/VERSION "$FILELIST"' EXIT
 # scripts/benchmarks/ is tracked but dev-only tooling, not part of a
 # deployed unit, so it is excluded explicitly.
 TRACKED_PATHS=(
-    main.py pyproject.toml uv.lock README.md
+    main.py sitetest.py SITETEST.md pyproject.toml uv.lock README.md
     wpu_client config scripts systemd deploy
     models/mobilefacenet.onnx models/face_recognition_sface_2021dec.onnx
     models/face_detection_yunet_2023mar.onnx

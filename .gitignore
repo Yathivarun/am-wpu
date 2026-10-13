@@ -117,3 +117,7 @@ data/people/*
 
 # Written into the release zip by scripts/make_release.sh; never committed.
 wpu_client/VERSION
+
+# Site test kit output and the capture store (frames of visitors)
+data/captures/
+data/sitetest/
