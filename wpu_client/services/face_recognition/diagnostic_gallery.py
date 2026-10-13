@@ -63,17 +63,20 @@ class DiagnosticGallery:
     def __init__(self, gallery_dir: str):
         self.gallery_dir = gallery_dir
         self._entries: list[GalleryEntry] = []
+        self._signature: dict[str, float] = {}
+        self._warned_skipped = 0
 
     def load(self) -> int:
         """Load every valid person sub-folder. Returns the number loaded."""
         self._entries = []
+        self._signature = self.signature()
         if not os.path.isdir(self.gallery_dir):
             logger.warning("Diagnostic gallery dir not found: %s", self.gallery_dir)
             return 0
 
         for slug in sorted(os.listdir(self.gallery_dir)):
             person_dir = os.path.join(self.gallery_dir, slug)
-            if not os.path.isdir(person_dir):
+            if slug.startswith(".") or not os.path.isdir(person_dir):
                 continue
             meta_path = os.path.join(person_dir, META_FILE)
             if not os.path.exists(meta_path):
@@ -151,14 +154,13 @@ class DiagnosticGallery:
         ]
         return random.choice(with_sketches or self._entries)
 
-    def match(self, vector, threshold: float, model: str) -> Optional[Match]:
-        """Nearest entry within `threshold` cosine distance, in `model`'s space.
+    def nearest(self, vector, model: str) -> Optional[Match]:
+        """Closest entry in `model`'s space, however far — None only when no
+        entry has a vector for that model.
 
         Only entries that carry a vector for `model` are considered — vectors
         from different models live in different spaces and are never compared.
         """
-        if not self._entries:
-            return None
         best: Optional[Match] = None
         skipped = 0
         for entry in self._entries:
@@ -173,11 +175,56 @@ class DiagnosticGallery:
                 continue
             if best is None or dist < best.distance:
                 best = Match(entry=entry, distance=dist)
-        if skipped:
+        if skipped and skipped != self._warned_skipped:
+            self._warned_skipped = skipped
             logger.warning(
                 "%d gallery entr(y/ies) have no '%s' vector — re-seed them to "
                 "match in this model. Skipped from matching.", skipped, model,
             )
+        return best
+
+    def match(self, vector, threshold: float, model: str) -> Optional[Match]:
+        """Nearest entry within `threshold` cosine distance, in `model`'s space."""
+        best = self.nearest(vector, model)
         if best is not None and best.distance < threshold:
             return best
         return None
+
+    # ── change detection (live seeding) ─────────────────────────────────
+
+    def signature(self) -> dict[str, float]:
+        """slug -> newest mtime of anything in that person's folder (one level
+        of sub-folders: sketches/, scenes/). A changed, added or removed
+        person changes the signature."""
+        sig: dict[str, float] = {}
+        if not os.path.isdir(self.gallery_dir):
+            return sig
+        for slug in os.listdir(self.gallery_dir):
+            person_dir = os.path.join(self.gallery_dir, slug)
+            if slug.startswith(".") or not os.path.isdir(person_dir):
+                continue
+            newest = 0.0
+            try:
+                for item in os.scandir(person_dir):
+                    newest = max(newest, item.stat().st_mtime)
+                    if item.is_dir():
+                        for sub in os.scandir(item.path):
+                            newest = max(newest, sub.stat().st_mtime)
+            except OSError:
+                continue
+            sig[slug] = newest
+        return sig
+
+    def reload_if_changed(self) -> set[str]:
+        """Reload when any person folder changed since the last (re)load.
+
+        Returns the slugs that were added, removed or modified — empty when
+        nothing changed (and nothing was reloaded).
+        """
+        sig = self.signature()
+        if sig == self._signature:
+            return set()
+        changed = {s for s in sig.keys() | self._signature.keys()
+                   if sig.get(s) != self._signature.get(s)}
+        self.load()
+        return changed

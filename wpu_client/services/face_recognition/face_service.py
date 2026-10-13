@@ -42,6 +42,7 @@ from wpu_client.services.face_recognition.base_composer import (
     compose_single_body,
     compose_single_face,
 )
+from wpu_client.services.face_recognition.capture_store import build_from_config as build_capture_store
 from wpu_client.services.face_recognition.diagnostic_gallery import DiagnosticGallery
 from wpu_client.services.face_recognition.local_assets import resolve_local_cutouts
 from wpu_client.utils.http import HTTPClient
@@ -323,6 +324,14 @@ class FaceRecognitionService(ServiceBase):
             self._assets_root = BASE_ASSETS_DIR
             self._duo_assets_root = BASE_DUO_ASSETS_DIR
 
+        # Full-frame + face-crop storage (config `capture_store`, off by
+        # default). Built here, started with the camera.
+        self._capture_store = build_capture_store(config)
+        # How the face just handed to _process_face_vector was resolved —
+        # "cache" | "gallery" | "server" — for the capture record.
+        self._last_match_source: Optional[str] = None
+        self._last_gallery_check = 0.0
+
     def start(self) -> None:
         """Start the face recognition service."""
         if self._running:
@@ -450,6 +459,13 @@ class FaceRecognitionService(ServiceBase):
                     "Seed faces with: python scripts/seed_face.py --name ... --face ..."
                 )
 
+        if self._capture_store is not None:
+            try:
+                self._capture_store.start()
+            except Exception as e:
+                logger.error(f"Capture store failed to start — continuing without it: {e}")
+                self._capture_store = None
+
         # Run the recognition loop in a background thread
         self._run_in_thread(self._recognition_loop)
 
@@ -468,6 +484,9 @@ class FaceRecognitionService(ServiceBase):
             self._camera.stop()
             self._camera.close()
             self._camera = None
+
+        if self._capture_store is not None:
+            self._capture_store.stop()
 
         if self._http_client:
             self._http_client.close()
@@ -527,6 +546,7 @@ class FaceRecognitionService(ServiceBase):
             try:
                 loop_count += 1
                 logger.debug(f"[Loop #{loop_count}] Starting face detection cycle...")
+                self._reload_gallery_if_changed()
                 self._capture_and_process()
                 self._check_person_timeout()
                 self._publish_overlay()
@@ -613,8 +633,16 @@ class FaceRecognitionService(ServiceBase):
                 x, y, fw, fh = arr[:4]
                 face_locations.append((int(y), int(x + fw), int(y + fh), int(x)))
 
+        store = self._capture_store
+        capture_now = time.time()
+        records = None
+        if store is not None and store.wants(bool(valid_faces), capture_now):
+            records = [self._face_record(i, row) for i, row in enumerate(valid_faces)]
+
         if not valid_faces:
             logger.debug(f"No faces detected (took {detection_time:.2f}s)")
+            if records is not None:
+                store.submit(bgr_frame, self._capture_record(capture_now, bgr_frame, yunet_wall_ms, []))
             if SAVE_DEBUG_FRAMES:
                 self._frames_since_last_save += 1
                 if self._frames_since_last_save >= self._save_every_n_frames:
@@ -647,8 +675,10 @@ class FaceRecognitionService(ServiceBase):
                 int(row[0]), int(row[1]), int(row[2]), int(row[3]),
             )
 
+            rec = records[idx] if records is not None else {}
             if face_width < self.config.min_face_size or face_height < self.config.min_face_size:
                 logger.debug(f"Skipping face too small: {face_width}x{face_height}")
+                rec["status"] = "too_small"
                 continue
 
             logger.debug(f"Processing face at ({x},{y}), size: {face_width}x{face_height}")
@@ -658,22 +688,33 @@ class FaceRecognitionService(ServiceBase):
             # YuNet detection row (bbox + 5 landmarks). BGR is required:
             # registration decodes its gallery images with cv2.imdecode
             # (BGR), so feeding RGB would shift the embedding.
+            embed_start = time.time()
             try:
                 face_array = self._embed_face(bgr_frame, row)
             except Exception as e:
                 logger.error(f"{self._model_name} embedding failed: {e}", exc_info=True)
+                rec["status"] = "embed_failed"
                 continue
+            rec["embed_ms"] = round((time.time() - embed_start) * 1000, 1)
 
             # L2-normalise (EUCLID collection convention — matches registration)
             face_array = face_array / (np.linalg.norm(face_array) + 1e-8)
             face_vector = face_array.tolist()
             bbox_area = float(face_width) * float(face_height)
 
+            self._last_match_source = None
             if self._process_face_vector(face_vector, bgr_frame, bbox_area):
                 processed_count += 1
+            if records is not None:
+                self._fill_identity(rec, face_vector)
 
         logger.debug(f"Identified {processed_count}/{len(order)} processed face(s) this frame")
         self._update_display_selection()
+
+        if records is not None:
+            store.submit(
+                bgr_frame, self._capture_record(capture_now, bgr_frame, yunet_wall_ms, records)
+            )
 
     def _embed_face(self, bgr_frame: np.ndarray, yunet_row: np.ndarray) -> np.ndarray:
         """Embed the detected face with the configured model (RAW, un-normalised).
@@ -743,12 +784,15 @@ class FaceRecognitionService(ServiceBase):
                 logger.debug(
                     f"Matched cached face: {entry['person_name']} ({match_id}) dist={distance:.4f}"
                 )
+                self._last_match_source = "cache"
                 return True
 
         logger.info("No cached match for this face — identifying...")
         if self._diagnostic_mode:
+            self._last_match_source = "gallery"
             return self._match_local_gallery(face_vector, frame, bbox_area)
         else:
+            self._last_match_source = "server"
             return self._send_identification_request(face_vector, frame, bbox_area)
 
     def _match_cached_faces(self, face_vector: list[float]) -> Optional[tuple[str, float]]:
@@ -792,13 +836,17 @@ class FaceRecognitionService(ServiceBase):
             self._handle_unrecognized(face_vector, bbox_area)
             return True
 
-        match = self._gallery.match(
-            face_vector, self.config.diagnostic_match_threshold, self._model_name
-        )
+        nearest = self._gallery.nearest(face_vector, self._model_name)
+        threshold = self.config.diagnostic_match_threshold
+        match = nearest if nearest is not None and nearest.distance < threshold else None
         if match is None:
+            closest = (
+                f"nearest {nearest.entry.name} dist={nearest.distance:.4f}"
+                if nearest is not None else "gallery has no vectors for this model"
+            )
             logger.info(
-                f"No local match within threshold "
-                f"({self.config.diagnostic_match_threshold} cosine) — not recognized"
+                f"No local match within threshold ({threshold} cosine) — "
+                f"not recognized ({closest})"
             )
             self._handle_unrecognized(face_vector, bbox_area)
             return True
@@ -980,6 +1028,108 @@ class FaceRecognitionService(ServiceBase):
             }
             self._tracked_faces[registration_id] = entry
             return entry
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Capture store records + live gallery reload
+    # ─────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _face_record(i: int, row) -> dict:
+        """The detector's view of one face, before recognition. Faces the
+        loop never reaches (past MAX_FACES_PER_FRAME) keep this status."""
+        x, y, fw, fh = (int(row[0]), int(row[1]), int(row[2]), int(row[3]))
+        return {
+            "i": i,
+            "bbox": [x, y, fw, fh],
+            "size": min(fw, fh),
+            "score": round(float(row[14]), 3) if len(row) > 14 else None,
+            "landmarks": [round(float(v), 1) for v in row[4:14]],
+            "status": "not_processed",
+        }
+
+    def _fill_identity(self, rec: dict, face_vector: list[float]) -> None:
+        """Record what recognition made of this face: the tracked entry it
+        now belongs to, and (diagnostic mode) the nearest gallery person."""
+        with self._person_lock:
+            found = next(
+                ((rid, e) for rid, e in self._tracked_faces.items() if e["face_vector"] is face_vector),
+                None,
+            )
+            if found is not None:
+                rid, entry = found
+                rec.update({
+                    "status": "unrecognized" if entry["unrecognized"] else "recognized",
+                    "source": self._last_match_source,
+                    "registration_id": rid,
+                    "name": entry["person_name"],
+                    "distance": round(float(entry.get("distance", 0.0)), 4),
+                })
+            else:
+                rec["status"] = "failed"
+        if self._diagnostic_mode and self._gallery is not None:
+            nearest = self._gallery.nearest(face_vector, self._model_name)
+            if nearest is not None:
+                rec["nearest"] = {
+                    "slug": nearest.entry.slug,
+                    "name": nearest.entry.name,
+                    "distance": round(nearest.distance, 4),
+                }
+
+    def _capture_record(self, t: float, frame: np.ndarray, detect_ms: float, faces: list) -> dict:
+        with self._person_lock:
+            tracked = len(self._tracked_faces)
+            displayed = self._displayed_registration_id
+        return {
+            "t": round(t, 3),
+            "frame_size": [int(frame.shape[1]), int(frame.shape[0])],
+            "detect_ms": round(detect_ms, 1),
+            "mode": "diagnostic" if self._diagnostic_mode else "base",
+            "model": self._model_name,
+            "threshold": (
+                self.config.diagnostic_match_threshold if self._diagnostic_mode else None
+            ),
+            "min_face_size": self.config.min_face_size,
+            "faces": faces,
+            "tracked": tracked,
+            "displayed": displayed,
+        }
+
+    def _reload_gallery_if_changed(self) -> None:
+        """Diagnostic mode: pick up people seeded (or re-seeded) while running.
+
+        Checked at most every `diagnostic_gallery_reload_s`. A changed person's
+        cached slides and duo pairs are dropped so they recompose from the new
+        cutouts, and every face currently tracked as "Not recognized" is
+        released, so whoever was just seeded while standing in front of the
+        camera is identified on the next frame rather than after they leave.
+        """
+        interval = float(getattr(self.config, "diagnostic_gallery_reload_s", 0) or 0)
+        if not self._diagnostic_mode or self._gallery is None or interval <= 0:
+            return
+        now = time.time()
+        if now - self._last_gallery_check < interval:
+            return
+        self._last_gallery_check = now
+        try:
+            changed = self._gallery.reload_if_changed()
+        except Exception as e:
+            logger.error(f"Gallery reload failed: {e}")
+            return
+        if not changed:
+            return
+        for slug in changed:
+            self._single_cache.pop(slug, None)
+            self._invalidate_duo_caches_for(slug)
+        with self._person_lock:
+            released = [rid for rid, e in self._tracked_faces.items() if e["unrecognized"]]
+            for rid in released:
+                self._tracked_faces.pop(rid)
+        logger.info(
+            f"Gallery reloaded: {len(self._gallery)} person(s); changed: "
+            f"{', '.join(sorted(changed))}; released {len(released)} unrecognized face(s)"
+        )
+        if released:
+            self._update_display_selection()
 
     # ─────────────────────────────────────────────────────────────────────
     # Local composition (both modes)

@@ -27,6 +27,26 @@ class SlideshowConfig(BaseModel):
     sort_mode: str = "alphabetical"  # numeric, alphabetical
 
 
+class CaptureStoreConfig(BaseModel):
+    """Full-frame + face-crop capture storage (see capture_store.py).
+
+    Off by default: it writes every frame that has a face in it, at up to one
+    per `min_interval_s`, which is several GB a day at a busy unit.
+    """
+
+    enabled: bool = False
+    dir: str = "data/captures"  # relative to the app directory unless absolute
+    save_full_frame: bool = True
+    save_faces: bool = True
+    min_interval_s: float = 1.0  # at most one saved frame per this many seconds
+    # Also keep one frame with nobody in it every N seconds (lighting over the
+    # day, false-trigger checks). 0 = only frames with a face.
+    save_empty_every_s: float = 0.0
+    jpeg_quality: int = 90
+    face_margin: float = 0.25  # crop grows the face box by this fraction per side
+    max_bytes: int = 20 * 1024 * 1024 * 1024  # oldest captures evicted beyond this
+
+
 class FaceRecognitionConfig(BaseModel):
     """Configuration for face recognition service."""
 
@@ -114,6 +134,12 @@ class FaceRecognitionConfig(BaseModel):
     # L2^2 / 2, so the server's L2 threshold of 1.08 corresponds to ~0.58 here;
     # 0.5 is a slightly stricter default. Tune per camera/lighting.
     diagnostic_match_threshold: float = 0.5
+    # Re-read the gallery when its folders change, at most this often, so a
+    # person seeded while the unit runs is recognised without a restart.
+    # 0 = load once at start.
+    diagnostic_gallery_reload_s: float = 5.0
+
+    capture_store: CaptureStoreConfig = Field(default_factory=CaptureStoreConfig)
 
 
 class ServicesConfig(BaseModel):

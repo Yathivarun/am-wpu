@@ -101,3 +101,21 @@ services:
     diagnostic_mode: false
     diagnostic_gallery_dir: "data/embeddings"
     diagnostic_match_threshold: 0.5  # cosine distance gate for a local match
+    # Re-read the gallery when it changes (seconds between checks), so people
+    # seeded while the unit runs are recognised without a restart. 0 = off.
+    diagnostic_gallery_reload_s: 5
+
+    # Full-frame + face-crop storage. Every frame with a face in it (at most
+    # one per min_interval_s) is kept as frame.jpg + face_<i>.jpg + meta.json
+    # under dir/<YYYYMMDD>/<time>/, with a per-day index.jsonl. Several GB a
+    # day at a busy unit — the oldest are evicted past max_bytes.
+    capture_store:
+      enabled: false
+      dir: "data/captures"
+      save_full_frame: true
+      save_faces: true
+      min_interval_s: 1.0
+      save_empty_every_s: 0  # also keep an empty frame every N s (0 = never)
+      jpeg_quality: 90
+      face_margin: 0.25
+      max_bytes: 21474836480  # 20 GB
