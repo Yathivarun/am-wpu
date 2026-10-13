@@ -115,9 +115,8 @@ def cmd_app(args):
         )
         path = s.file(f"app_config_{time.strftime('%H%M%S')}.yaml")
         path.write_text(yaml.safe_dump(cfg, sort_keys=False))
-        system.write_dropin(
-            unit, f'"{system.python_exe()}" main.py --service all --diagnostic --config "{path}"'
-        )
+        system.require_unit(unit)
+        system.write_dropin(unit, _app_exec(path))
         t0 = time.time()
         system.restart(unit)
         up = system.wait_active(unit, 60)
@@ -427,11 +426,18 @@ def cmd_stress(args):
 # ── display patterns, notes, report, collect ────────────────────────────
 
 
+def _app_exec(config_path) -> str:
+    return f'"{system.python_exe()}" main.py --service all --diagnostic --config "{config_path}"'
+
+
 def cmd_patterns(args):
+    """Patterns run on the diagnostic unit (slideshow only, pattern folder as
+    its images) — the one unit every kit Pi has. `stop` puts the app back with
+    the settings of the last `app start`."""
     from wpu_client.sitetest import patterns
 
     s = sessions.current()
-    only = system.UNITS["only"]
+    unit = system.require_unit(system.UNITS["diagnostic"])
     if args.action == "start":
         out = s.file("patterns")
         patterns.write_all(out)
@@ -441,17 +447,24 @@ def cmd_patterns(args):
         sl["advance_time"] = args.seconds
         path = s.file("patterns_config.yaml")
         path.write_text(yaml.safe_dump(cfg, sort_keys=False))
-        system.write_dropin(only, f'"{system.python_exe()}" main.py --service slideshow --config "{path}"')
-        system.restart(only)
+        system.write_dropin(unit, f'"{system.python_exe()}" main.py --service slideshow --config "{path}"')
+        system.restart(unit)
         print(
-            f"patterns cycling every {args.seconds}s on the panel. Judge each, then record it, e.g.\n"
-            f'  python sitetest.py note --test display --label geometry --verdict pass "circle round"\n'
-            f"then: python sitetest.py patterns stop"
+            f"patterns cycling every {args.seconds}s on the panel (camera off). Judge each on screen, "
+            "then record it, e.g.\n"
+            '  python sitetest.py note --test display --label geometry --verdict pass "circle round"\n'
+            "then: python sitetest.py patterns stop"
         )
+        return
+    state = s.app_settings()
+    if state.get("config") and Path(state["config"]).exists():
+        system.write_dropin(unit, _app_exec(state["config"]))
+        system.restart(unit)
+        print(f"patterns stopped — app back on its last settings (scene_source={state.get('scene_source')})")
     else:
-        system.remove_dropin(only)
-        system.sudo(["systemctl", "stop", only], check=False)
-        print("patterns stopped — restart the app: python sitetest.py app start ...")
+        system.remove_dropin(unit)
+        system.sudo(["systemctl", "stop", unit], check=False)
+        print("patterns stopped — start the app: python sitetest.py app start ...")
 
 
 def cmd_note(args):

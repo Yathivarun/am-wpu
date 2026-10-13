@@ -10,7 +10,7 @@ Every test writes `data/sitetest/<session>/results/NNN_<test>_<VERDICT>.json` + 
 |---|---|
 | 1. Start | `sitetest.py session start --name <site>` → `sitetest.py check` |
 | 2. App + logging | `sitetest.py app start --scene-source compose` (or `precomposed`; `--strict` = no fallback) · `sitetest.py telemetry start` |
-| 3. Panel | `sitetest.py patterns start` → judge → `sitetest.py note --test display --label geometry --verdict pass "circle round"` → `patterns stop` → `app start` again |
+| 3. Panel | `sitetest.py patterns start` → judge each on screen → `sitetest.py note --test display --label geometry --verdict pass "circle round"` → `patterns stop` (app comes back on its last settings) |
 | 4. Seed visitors | visitor faces the display, then `sitetest.py seed --name Asha --gender female --height 160 --from-capture --proxy-from auto` · list: `sitetest.py gallery` |
 | 5. Range | per floor mark: `sitetest.py scenario spot --expect varun --label 2m-centre` |
 | 6. Scenarios | `sitetest.py scenario list`, then e.g. `scenario empty`, `scenario single --expect varun --label glasses`, `scenario unknown`, `scenario duo --expect varun,asha`, `mixed`, `crowd`, `return`, `walkby`, `queue --expect a,b,c`, `spoof --expect varun` |

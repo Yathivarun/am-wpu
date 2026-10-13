@@ -63,6 +63,18 @@ def unit_prop(unit: str, prop: str) -> str:
     return out
 
 
+def unit_exists(unit: str) -> bool:
+    return unit_prop(unit, "LoadState") == "loaded"
+
+
+def require_unit(unit: str) -> str:
+    if not unit_exists(unit):
+        raise SystemExit(
+            f"{unit} is not installed on this Pi — install the units with: scripts/setup.sh units"
+        )
+    return unit
+
+
 def unit_active(unit: str) -> bool:
     return run(["systemctl", "is-active", unit]).stdout.strip() == "active"
 
