@@ -32,14 +32,18 @@ from wpu_client.services.face_recognition.asset_fetcher import (
     fetch_precomposed_scenes,
     link_precomposed_into,
     link_videos_into,
+    load_cached_character_art,
     touch,
 )
 from wpu_client.services.face_recognition.base_composer import (
     BODY_PREFIX,
+    CHAR_PREFIX,
     FACE_PREFIX,
     compose_duo_body,
+    compose_duo_character,
     compose_duo_face,
     compose_single_body,
+    compose_single_character,
     compose_single_face,
 )
 from wpu_client.services.face_recognition.capture_store import build_from_config as build_capture_store
@@ -85,6 +89,11 @@ SAU_DUO_DIR = BASE_SCENES_DIR / "sau_duo"
 SAU_DUO_CONFIG_PATH = SAU_DUO_DIR / "scenes_config.json"
 FRU_DUO_DIR = BASE_SCENES_DIR / "fru_duo"
 FRU_DUO_CONFIG_PATH = FRU_DUO_DIR / "scenes_config.json"
+# Character scenes are the drawn-face stock images (the same art as fru_*);
+# only their configs live under base_scenes/.
+CHARACTER_SCENES_DIR = DATA_DIR / "stock_images"
+CHARACTER_SINGLE_CONFIG_PATH = BASE_SCENES_DIR / "character_single" / "scenes_config.json"
+CHARACTER_DUO_CONFIG_PATH = BASE_SCENES_DIR / "character_duo" / "scenes_config.json"
 
 # Enable debug frame saving by setting environment variable: SAVE_DEBUG_FRAMES=1
 SAVE_DEBUG_FRAMES = os.getenv("SAVE_DEBUG_FRAMES", "0") == "1"
@@ -151,10 +160,21 @@ def _has_composed_slides(display_dir: Path) -> bool:
     """Whether the composer wrote any scene slide (videos don't count)."""
     try:
         return display_dir.is_dir() and any(
-            p.name.startswith((BODY_PREFIX, FACE_PREFIX)) for p in display_dir.iterdir()
+            p.name.startswith((BODY_PREFIX, FACE_PREFIX, CHAR_PREFIX)) for p in display_dir.iterdir()
         )
     except OSError:
         return False
+
+
+def _cutouts_of(assets: dict) -> dict:
+    """The compose inputs out of a fetch_person_assets result."""
+    return {"sau": assets["sau"], "fru": assets["fru"], "characters": assets.get("characters") or []}
+
+
+def _composed_inputs_changed(changed: set) -> bool:
+    """Whether a refetch replaced anything slides are composed from (a cutout
+    or a character art; videos are linked, not composed)."""
+    return any(not k.startswith("video_") for k in changed)
 
 
 def _clear_composed(display_dir: Path) -> None:
@@ -162,7 +182,8 @@ def _clear_composed(display_dir: Path) -> None:
     scenes take over, so the two sets are never shown together."""
     try:
         for p in display_dir.iterdir():
-            if p.name.startswith((BODY_PREFIX, FACE_PREFIX, f".{BODY_PREFIX}", f".{FACE_PREFIX}")):
+            if p.name.startswith((BODY_PREFIX, FACE_PREFIX, CHAR_PREFIX,
+                                  f".{BODY_PREFIX}", f".{FACE_PREFIX}", f".{CHAR_PREFIX}")):
                 p.unlink()
     except OSError:
         pass
@@ -1171,6 +1192,7 @@ class FaceRecognitionService(ServiceBase):
         for key, name in (("sau", SAU_LOCAL_NAME), ("fru", FRU_LOCAL_NAME)):
             path = raw_dir / name
             cutouts[key] = path if path.exists() else None
+        cutouts["characters"] = load_cached_character_art(raw_dir)
         return cutouts
 
     def _cutouts_are_newer_than(self, cutouts: dict, display_dir: Path) -> bool:
@@ -1236,7 +1258,7 @@ class FaceRecognitionService(ServiceBase):
                 # comes first; a fallback to composing fetches them then.
                 have_cutouts = sources[0] == "compose"
                 assets = self._fetch_assets(registration_id, assets_dir, have_cutouts)
-                cutouts = {"sau": assets["sau"], "fru": assets["fru"]}
+                cutouts = _cutouts_of(assets)
                 videos = assets["videos"]
                 stale = bool(assets["changed"])
 
@@ -1254,8 +1276,8 @@ class FaceRecognitionService(ServiceBase):
                 if source == "compose":
                     if not have_cutouts:
                         assets = self._fetch_assets(registration_id, assets_dir, True)
-                        cutouts = {"sau": assets["sau"], "fru": assets["fru"]}
-                        if assets["changed"] & {"sau", "fru"}:
+                        cutouts = _cutouts_of(assets)
+                        if _composed_inputs_changed(assets["changed"]):
                             _clear_composed(display_dir)
                             self._invalidate_duo_caches_for(registration_id)
                     compose_single_body(
@@ -1266,6 +1288,11 @@ class FaceRecognitionService(ServiceBase):
                         self._yunet_detector, cutouts["fru"], gender,
                         FRU_SINGLE_DIR, FRU_SINGLE_CONFIG_PATH, display_dir,
                     )
+                    if cutouts.get("characters"):
+                        compose_single_character(
+                            cutouts["characters"], gender,
+                            CHARACTER_SCENES_DIR, CHARACTER_SINGLE_CONFIG_PATH, display_dir,
+                        )
                     if _has_composed_slides(display_dir):
                         clear_precomposed(display_dir)
                         break
@@ -1385,6 +1412,12 @@ class FaceRecognitionService(ServiceBase):
                 self._yunet_detector, cutouts_a["fru"], cutouts_b["fru"],
                 entry_a.get("gender"), entry_b.get("gender"),
                 FRU_DUO_DIR, FRU_DUO_CONFIG_PATH, output_dir,
+            )
+        if cutouts_a.get("characters") and cutouts_b.get("characters"):
+            compose_duo_character(
+                cutouts_a["characters"], cutouts_b["characters"],
+                entry_a.get("gender"), entry_b.get("gender"),
+                CHARACTER_SCENES_DIR, CHARACTER_DUO_CONFIG_PATH, output_dir,
             )
 
         if not _has_content(output_dir):

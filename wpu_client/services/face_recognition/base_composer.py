@@ -27,6 +27,22 @@ pipeline's 5% content padding, and FRU eyes fall back to YuNet detection.
 SAU and FRU are different composition mechanics and are NEVER cross-composed
 — each produces its own separate slides.
 
+Character (FRU's character form, kept beside it for now): the server's
+character pipeline draws the visitor's head in the style of a premade
+character, one RGBA art per character, already in that character's pose. The
+geometry the server sends with each art (`crop_box` in the character's scene,
+`scene_size`) is all the placement there is: resize the art to the box and
+alpha-blend it, no landmarks or warp. The scenes are the drawn-face stock
+images (data/stock_images/), the same art as fru_single / fru_duo:
+    character_single/ scenes_config.json  {"<stock stem>": {"gender": [...],
+                                                            "character": "<id>"}}
+    character_duo/    scenes_config.json  {"<stock stem>": {"gender": [...],
+                                                            "character_1": "<id>",
+                                                            "character_2": "<id>",
+                                                            "gender_1": "male"?}}
+A duo scene has one character per figure; each visitor gets art for every
+figure of their gender, so either person can stand on either side.
+
 Scene assets (supplied separately — code must not assume they exist):
     data/base_scenes/
         sau_single/  scenes_config.json  {"<id>": {"scale": f, "anchor": [x, y],
@@ -79,6 +95,7 @@ _SCENE_EXTENSIONS = (".png", ".jpg", ".jpeg")
 # for its own and skip composing altogether.
 BODY_PREFIX = "sau_scene_"
 FACE_PREFIX = "fru_scene_"
+CHAR_PREFIX = "chr_scene_"
 
 # Bump whenever composition output changes for the same inputs, so slides
 # already cached on deployed units are recomposed instead of shown stale.
@@ -900,4 +917,198 @@ def compose_duo_face(
         f"Base duo face compose: {len(written)} scene(s) -> {output_dir} "
         f"[{', '.join(written)}]"
     )
+    return str(output_dir)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Character (FRU character form)
+# ─────────────────────────────────────────────────────────────────────────
+
+
+# Scale factor below which character art is shrunk by area averaging (see
+# place_character). Measured on real character art against the server's PIL
+# blend: 0.9 keeps every size from 1/3 to 1.2x within 35.8 dB of it.
+CHARACTER_AREA_BELOW = 0.9
+
+
+def load_character_art(path: Path | str | None) -> np.ndarray | None:
+    """A character art (RGBA WebP/PNG from the server) as BGRA, or None."""
+    if not path:
+        return None
+    try:
+        img = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    except cv2.error:
+        img = None
+    if img is None or img.ndim != 3 or img.shape[2] != 4:
+        logger.warning(f"Unreadable or alpha-less character art: {path}")
+        return None
+    return img
+
+
+def place_character(scene_bgra: np.ndarray, art_bgra: np.ndarray, geometry: dict) -> bool:
+    """Resize the art to its crop box and alpha-blend it there.
+
+    The cv2 form of the server's own compose (sketch-service
+    character_postprocess.compose: Lanczos colour, bilinear alpha). A scene of
+    another size than the one the art was drawn for is a registry/scene
+    mismatch: raise rather than place it somewhere wrong.
+    """
+    sh, sw = scene_bgra.shape[:2]
+    size = geometry.get("scene_size")
+    if size is not None and (int(size[0]), int(size[1])) != (sw, sh):
+        raise ValueError(f"scene is {sw}x{sh}, art was drawn for {size[0]}x{size[1]}")
+    x0, y0, x1, y1 = (int(v) for v in geometry["crop_box"])
+    w, h = x1 - x0, y1 - y0
+    if w <= 0 or h <= 0:
+        raise ValueError(f"empty crop_box {geometry['crop_box']}")
+    # PIL's Lanczos/bilinear smooth before shrinking; cv2's don't, which
+    # aliases small (duo) heads. Below CHARACTER_AREA_BELOW use area
+    # averaging for both, which stays within ~36 dB of the server's PIL
+    # output (vs ~27 dB for cv2 Lanczos at 1/3 size); above it Lanczos +
+    # bilinear match it to ~48 dB.
+    ah, aw = art_bgra.shape[:2]
+    if min(w / aw, h / ah) < CHARACTER_AREA_BELOW:
+        colour_mode = alpha_mode = cv2.INTER_AREA
+    else:
+        colour_mode, alpha_mode = cv2.INTER_LANCZOS4, cv2.INTER_LINEAR
+    bgr = cv2.resize(art_bgra[..., :3], (w, h), interpolation=colour_mode)
+    alpha = cv2.resize(art_bgra[..., 3], (w, h), interpolation=alpha_mode)
+    return _blend(scene_bgra, bgr, alpha.astype(np.float32) / 255.0, x0, y0)
+
+
+def _arts_by_id(arts) -> dict:
+    """{character_id: art item} from the fetcher's list of
+    {"character_id", "path", "geometry"} dicts."""
+    out = {}
+    for a in arts or []:
+        try:
+            out[str(a["character_id"])] = a
+        except (KeyError, TypeError):
+            continue
+    return out
+
+
+def _character_stamp(*arts_lists) -> dict:
+    """What a character slide depends on besides the art bytes (which the
+    fetcher's change tracking covers): the set of arts and their registry."""
+    return {"chars": [sorted(f"{a['character_id']}@{(a.get('geometry') or {}).get('registry_version')}"
+                             for a in arts) for arts in arts_lists]}
+
+
+def _place_art(scene: np.ndarray, art: dict, scene_id: str) -> bool:
+    bgra = load_character_art(art.get("path"))
+    if bgra is None:
+        return False
+    try:
+        return place_character(scene, bgra, art.get("geometry") or {})
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning(f"Character compose: cannot place {art.get('character_id')} "
+                       f"on scene {scene_id}: {e}")
+        return False
+
+
+def compose_single_character(
+    arts: list,
+    gender: str | None,
+    scenes_dir: Path,
+    scenes_config_path: Path,
+    output_dir: Path,
+) -> str | None:
+    """Compose one person's character arts onto every character_single scene
+    they have art for. All of them: one slide per character."""
+    by_id = _arts_by_id(arts)
+    if not by_id:
+        logger.info("Character compose: no character art for this person")
+        return None
+    stamp = _character_stamp(by_id.values())
+    if _cache_hit(output_dir, CHAR_PREFIX, stamp):
+        logger.info(f"Character cache hit on disk: {output_dir}")
+        return str(output_dir)
+
+    scenes_config = _load_scenes_config(scenes_config_path)
+    if not scenes_config:
+        return None
+
+    written: list[str] = []
+    for scene_id, meta in scenes_config.items():
+        art = by_id.get(str(meta.get("character")))
+        if art is None or not _gender_allows(gender, meta):
+            continue
+        scene_file = find_scene_file(scenes_dir, scene_id)
+        if scene_file is None:
+            continue
+        scene = load_alpha_bgra(scene_file)
+        if scene is None or not _place_art(scene, art, scene_id):
+            continue
+        if _write_scene(scene, output_dir, f"{CHAR_PREFIX}{scene_id}"):
+            written.append(scene_label(scene_id, meta))
+
+    if not written:
+        logger.warning("Character compose: no scenes produced any output")
+        return None
+    _write_stamp(output_dir, CHAR_PREFIX, stamp)
+    logger.info(f"Character compose: {len(written)} scene(s) -> {output_dir} [{', '.join(written)}]")
+    return str(output_dir)
+
+
+def compose_duo_character(
+    arts_a: list,
+    arts_b: list,
+    gender_a: str | None,
+    gender_b: str | None,
+    scenes_dir: Path,
+    scenes_config_path: Path,
+    output_dir: Path,
+) -> str | None:
+    """Compose two people's character arts onto every matching character_duo scene.
+
+    The character form of compose_duo_face: the pair is gender-filtered the
+    same way (_duo_gender_allows), person A takes figure 1 and B figure 2, and
+    in a mixed scene the two swap when figure 1 (`gender_1`) is drawn as the
+    other gender. Each person needs their own art for the figure they land on.
+    """
+    by_a, by_b = _arts_by_id(arts_a), _arts_by_id(arts_b)
+    if not by_a or not by_b:
+        logger.info("Duo character compose: both people need character art")
+        return None
+    stamp = _character_stamp(by_a.values(), by_b.values())
+    if _cache_hit(output_dir, CHAR_PREFIX, stamp):
+        logger.info(f"Duo character cache hit on disk: {output_dir}")
+        return str(output_dir)
+
+    scenes_config = _load_scenes_config(scenes_config_path)
+    if not scenes_config:
+        return None
+
+    written: list[str] = []
+    for scene_id, meta in scenes_config.items():
+        if not _duo_gender_allows(gender_a, gender_b, meta):
+            continue
+        first, second = by_a, by_b
+        want = str(meta.get("gender_1") or "").lower()
+        ga, gb = (gender_a or "").lower(), (gender_b or "").lower()
+        if want and ga and gb and ga != gb and ga != want:
+            first, second = by_b, by_a
+        art_1 = first.get(str(meta.get("character_1")))
+        art_2 = second.get(str(meta.get("character_2")))
+        if art_1 is None or art_2 is None:
+            continue
+        scene_file = find_scene_file(scenes_dir, scene_id)
+        if scene_file is None:
+            continue
+        scene = load_alpha_bgra(scene_file)
+        if scene is None:
+            continue
+        # A duo slide with one figure still the stock character would
+        # misrepresent the pair: both must place.
+        if not (_place_art(scene, art_1, scene_id) and _place_art(scene, art_2, scene_id)):
+            continue
+        if _write_scene(scene, output_dir, f"{CHAR_PREFIX}{scene_id}"):
+            written.append(scene_label(scene_id, meta))
+
+    if not written:
+        logger.warning("Duo character compose: no scenes produced any output")
+        return None
+    _write_stamp(output_dir, CHAR_PREFIX, stamp)
+    logger.info(f"Duo character compose: {len(written)} scene(s) -> {output_dir} [{', '.join(written)}]")
     return str(output_dir)

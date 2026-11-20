@@ -27,7 +27,10 @@ BODY_DUO = BASE_SCENES / "sau_duo" / "scenes_config.json"
 FACE_SINGLE = BASE_SCENES / "fru_single" / "scenes_config.json"
 FACE_DUO = BASE_SCENES / "fru_duo" / "scenes_config.json"
 
-ALL_CONFIGS = [BODY_SINGLE, BODY_DUO, FACE_SINGLE, FACE_DUO]
+CHAR_SINGLE = BASE_SCENES / "character_single" / "scenes_config.json"
+CHAR_DUO = BASE_SCENES / "character_duo" / "scenes_config.json"
+
+ALL_CONFIGS = [BODY_SINGLE, BODY_DUO, FACE_SINGLE, FACE_DUO, CHAR_SINGLE, CHAR_DUO]
 
 
 def _load(path):
@@ -110,7 +113,7 @@ def test_face_duo_shape():
             )
 
 
-@pytest.mark.parametrize("path", [FACE_SINGLE, FACE_DUO], ids=lambda p: p.parent.name)
+@pytest.mark.parametrize("path", [FACE_SINGLE, FACE_DUO, CHAR_SINGLE, CHAR_DUO], ids=lambda p: p.parent.name)
 def test_face_gender_lists_are_lowercase_and_known(path):
     """Gender matching is exact against the lowercased value from the server,
     whose enum is {male, female}. A stray 'Male' or 'M' here would silently
@@ -173,3 +176,48 @@ def test_every_entry_has_a_name_the_script_agrees_with(path):
         + "\n".join(notes)
     )
 
+
+# ── Character scenes ─────────────────────────────────────────────────────
+# Their backgrounds are the drawn-face stock images, so a scene id must name
+# one the asset manifest ships, and every character id must be unique: one
+# art goes on exactly one figure.
+
+
+def _shipped_stock_stems():
+    stems = set()
+    for line in Path("data/assets.manifest").read_text().splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2].startswith("data/stock_images/"):
+            stems.add(Path(parts[2]).stem)
+    return stems
+
+
+@pytest.mark.parametrize("path", [CHAR_SINGLE, CHAR_DUO], ids=lambda p: p.parent.name)
+def test_character_scenes_are_shipped_stock_images(path):
+    shipped = _shipped_stock_stems()
+    for scene_id in _load(path):
+        assert scene_id in shipped, f"{path.parent.name}[{scene_id}]: not in data/assets.manifest"
+
+
+def test_character_single_shape():
+    for scene_id, meta in _load(CHAR_SINGLE).items():
+        assert isinstance(meta.get("character"), str) and meta["character"], scene_id
+        assert len(meta.get("gender", [])) == 1, f"{scene_id}: a character is drawn as one gender"
+        assert "mixed" not in meta["gender"], scene_id
+
+
+def test_character_duo_shape():
+    for scene_id, meta in _load(CHAR_DUO).items():
+        for n in (1, 2):
+            assert isinstance(meta.get(f"character_{n}"), str) and meta[f"character_{n}"], scene_id
+        if "mixed" in meta.get("gender", []):
+            assert meta.get("gender_1") in ("male", "female"), (
+                f"{scene_id}: a mixed scene must say which gender figure 1 is drawn as"
+            )
+
+
+def test_character_ids_are_unique():
+    ids = [m["character"] for m in _load(CHAR_SINGLE).values()]
+    for meta in _load(CHAR_DUO).values():
+        ids += [meta["character_1"], meta["character_2"]]
+    assert len(ids) == len(set(ids)), "a character id is used for two figures"

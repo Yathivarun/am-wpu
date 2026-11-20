@@ -9,6 +9,8 @@ half.
 
 Layout per person (assets_dir = data/base_assets/<registration_id>/):
     raw/            sau.png, fru.png, video_1.mov, ...  (whichever fetched)
+                    chr_<character_id>.webp + characters.json (character art
+                    and the geometry the server sent with each)
     manifest.json   per-asset fetch state
     display/        composed slides + hardlinked videos (written by the caller)
 
@@ -69,6 +71,15 @@ FRU_LOCAL_NAME = "fru.png"
 # server's own object key so the slideshow's extension-based video detection
 # still recognises the file; anything it wouldn't play falls back to .mp4
 # (the content type the upload route defaults to).
+# Character art (the server's `character_art` list): one RGBA art per
+# premade character, stored as chr_<character_id>.webp, with characters.json
+# keeping each art's placement geometry so the composer (and a restart) can
+# find them without asking the server again.
+CHARACTER_LOCAL_PREFIX = "chr_"
+CHARACTER_SUFFIX = ".webp"
+CHARACTER_INDEX_NAME = "characters.json"
+_CHARACTER_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
 VIDEO_LOCAL_PREFIX = "video_"
 VIDEO_SUFFIXES = (".mov", ".mp4")
 DEFAULT_VIDEO_SUFFIX = ".mp4"
@@ -141,13 +152,18 @@ def _fetch_cutout_urls(
     sau_filename: str,
     fru_filename: str,
 ) -> dict:
-    """Resolve this person's SAU/FRU cutout URLs. Returns {"sau": …, "fru": …}.
+    """Resolve this person's SAU/FRU cutout URLs. Returns {"sau": …, "fru": …,
+    "characters": list | None}.
+
+    "characters" is the raw `character_art` list, or None when the server sent
+    no such field (an older server) or could not be reached — the caller keeps
+    its cached arts then rather than dropping them.
 
     Prefers the server's explicit labels over guessing from the flat list:
     they are unambiguous, and a registration with only one of the two cutouts
     yields a one-entry `signed_urls` that position alone can't disambiguate.
     """
-    urls: dict = {"sau": None, "fru": None}
+    urls: dict = {"sau": None, "fru": None, "characters": None}
     if not endpoint:
         return urls
 
@@ -155,6 +171,8 @@ def _fetch_cutout_urls(
     if not data:
         return urls
 
+    art = data.get("character_art")
+    urls["characters"] = art if isinstance(art, list) else None
     urls["sau"] = _str_or_none(data.get("sau_signed_url"))
     urls["fru"] = _str_or_none(data.get("fru_signed_url"))
     if urls["sau"] and urls["fru"]:
@@ -344,6 +362,102 @@ def _prune_videos(raw_dir: Path, keep: set[str], manifest: dict) -> None:
         manifest.pop(os.path.splitext(stale.name)[0], None)
 
 
+def _character_items(listing: list) -> list[tuple[str, str, dict]]:
+    """Valid (character_id, url, geometry) entries of a `character_art` list.
+
+    The id becomes a filename, so it is held to a safe pattern; an entry
+    without a usable URL or crop box is skipped (and logged), never guessed.
+    """
+    items = []
+    for entry in listing:
+        try:
+            cid = str(entry["character_id"])
+            url = _str_or_none(entry["signed_url"])
+            geometry = entry["geometry"]
+            box = geometry["crop_box"]
+        except (KeyError, TypeError):
+            logger.warning(f"Skipping malformed character_art entry: {entry!r}"[:200])
+            continue
+        if not _CHARACTER_ID.match(cid) or not url or not isinstance(box, (list, tuple)) or len(box) != 4:
+            logger.warning(f"Skipping malformed character_art entry for {cid!r}")
+            continue
+        items.append((cid, url, dict(geometry)))
+    return items
+
+
+def load_cached_character_art(raw_dir: Path) -> list[dict]:
+    """The character arts already on disk: [{"character_id", "path", "geometry"}]."""
+    try:
+        index = json.loads((raw_dir / CHARACTER_INDEX_NAME).read_text())
+    except (OSError, ValueError):
+        return []
+    arts = []
+    for entry in index if isinstance(index, list) else []:
+        try:
+            path = raw_dir / f"{CHARACTER_LOCAL_PREFIX}{entry['character_id']}{CHARACTER_SUFFIX}"
+            if path.exists():
+                arts.append({"character_id": entry["character_id"], "path": path,
+                             "geometry": entry["geometry"]})
+        except (KeyError, TypeError):
+            continue
+    return arts
+
+
+def _fetch_character_art(
+    http_client: HTTPClient,
+    listing: list | None,
+    raw_dir: Path,
+    manifest: dict,
+    changed: set,
+) -> list[dict]:
+    """Download this person's character arts and record their geometry.
+
+    `listing` None (older server, unreachable) keeps whatever is cached. A
+    listed-but-empty list means the server has no art for them: cached arts
+    are removed, so slides of a withdrawn character can't linger. Removed or
+    refreshed arts are reported in `changed`.
+    """
+    if listing is None:
+        return load_cached_character_art(raw_dir)
+
+    arts, keep = [], set()
+    for cid, url, geometry in _character_items(listing):
+        local_name = f"{CHARACTER_LOCAL_PREFIX}{cid}{CHARACTER_SUFFIX}"
+        keep.add(local_name)
+        key = f"{CHARACTER_LOCAL_PREFIX}{cid}"
+        path, fresh = _fetch_one(http_client, url, local_name, raw_dir, manifest, key)
+        if path is not None:
+            arts.append({"character_id": cid, "path": path, "geometry": geometry})
+        if fresh:
+            changed.add(key)
+
+    try:
+        stale = [p for p in raw_dir.iterdir()
+                 if p.name.startswith(CHARACTER_LOCAL_PREFIX) and p.name.endswith(CHARACTER_SUFFIX)
+                 and p.name not in keep]
+    except OSError:
+        stale = []
+    for p in stale:
+        try:
+            p.unlink()
+        except OSError as e:
+            logger.warning(f"Could not remove withdrawn character art {p}: {e}")
+            continue
+        key = p.name[: -len(CHARACTER_SUFFIX)]
+        manifest.pop(key, None)
+        changed.add(key)
+        logger.info(f"Removed withdrawn character art {p.name}")
+
+    if arts or stale or (raw_dir / CHARACTER_INDEX_NAME).exists():
+        try:
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            (raw_dir / CHARACTER_INDEX_NAME).write_text(json.dumps(
+                [{"character_id": a["character_id"], "geometry": a["geometry"]} for a in arts]))
+        except OSError as e:
+            logger.warning(f"Could not write {CHARACTER_INDEX_NAME} in {raw_dir}: {e}")
+    return arts
+
+
 def fetch_person_assets(
     http_client: HTTPClient,
     wpu_endpoint: str,
@@ -376,10 +490,11 @@ def fetch_person_assets(
             "sau": Path | None,
             "fru": Path | None,
             "videos": list[Path],
+            "characters": list[dict],  # {"character_id", "path", "geometry"}
             "changed": set[str],   # asset keys whose bytes were just refreshed
         }
     """
-    result: dict = {"sau": None, "fru": None, "videos": [], "changed": set()}
+    result: dict = {"sau": None, "fru": None, "videos": [], "characters": [], "changed": set()}
     try:
         raw_dir = assets_dir / RAW_DIR_NAME
         manifest_path = assets_dir / MANIFEST_NAME
@@ -400,6 +515,9 @@ def fetch_person_assets(
                 result[key] = path
                 if changed:
                     result["changed"].add(key)
+            result["characters"] = _fetch_character_art(
+                http_client, cutout_urls.get("characters"), raw_dir, manifest, result["changed"],
+            )
 
         keep_video_names = set()
         for index, url in enumerate(video_urls, start=1):
@@ -435,7 +553,8 @@ def fetch_person_assets(
 
     logger.info(
         f"Assets for {registration_id}: sau={'y' if result['sau'] else 'n'} "
-        f"fru={'y' if result['fru'] else 'n'} videos={len(result['videos'])} "
+        f"fru={'y' if result['fru'] else 'n'} characters={len(result['characters'])} "
+        f"videos={len(result['videos'])} "
         f"changed={sorted(result['changed']) or 'none'}"
     )
     return result

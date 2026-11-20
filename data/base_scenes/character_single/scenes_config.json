@@ -1,0 +1,52 @@
+{
+  "f1f": {
+    "name": "Horse Rider",
+    "gender": ["male"],
+    "character": "M01"
+  },
+  "f2f": {
+    "name": "Meditator",
+    "gender": ["male"],
+    "character": "M02"
+  },
+  "f3f": {
+    "name": "Scholar",
+    "gender": ["male"],
+    "character": "M03"
+  },
+  "f4f": {
+    "name": "King on Cliff",
+    "gender": ["male"],
+    "character": "M04"
+  },
+  "f5f": {
+    "name": "Dancer",
+    "gender": ["male"],
+    "character": "M05"
+  },
+  "f6f": {
+    "name": "Dancer",
+    "gender": ["female"],
+    "character": "F06"
+  },
+  "f7f": {
+    "name": "Princess in Palace",
+    "gender": ["female"],
+    "character": "F07"
+  },
+  "f8f": {
+    "name": "Female Sword Warrior",
+    "gender": ["female"],
+    "character": "F08"
+  },
+  "f9f": {
+    "name": "Female Horse Rider",
+    "gender": ["female"],
+    "character": "F09"
+  },
+  "f10f": {
+    "name": "Meditator",
+    "gender": ["female"],
+    "character": "F10"
+  }
+}

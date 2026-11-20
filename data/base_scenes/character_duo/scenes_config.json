@@ -1,0 +1,27 @@
+{
+  "d1f": {
+    "name": "2 Horse Riders",
+    "gender": ["male"],
+    "character_1": "D1_1",
+    "character_2": "D1_2"
+  },
+  "d2f": {
+    "name": "2 Meditators",
+    "gender": ["male"],
+    "character_1": "D2_1",
+    "character_2": "D2_2"
+  },
+  "d3f": {
+    "name": "2 Female Dancers",
+    "gender": ["female"],
+    "character_1": "D3_1",
+    "character_2": "D3_2"
+  },
+  "d4f": {
+    "name": "Male & Female Dancers",
+    "gender": ["mixed"],
+    "gender_1": "male",
+    "character_1": "D4_1",
+    "character_2": "D4_2"
+  }
+}

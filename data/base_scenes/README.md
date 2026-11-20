@@ -27,6 +27,18 @@ Every entry also carries a generated `name` — see the field reference below.
 | `sau_duo/` | two bodies | `{"<id>": {"scale_1": f, "anchor_1": [x, y], "scale_2": f, "anchor_2": [x, y]}}` |
 | `fru_single/` | one face | `{"<id>": {"gender": [...], "face_anchor": {...}}}` |
 | `fru_duo/` | two faces | `{"<id>": {"gender": [...], "face_anchor_1": {...}, "face_anchor_2": {...}}}` |
+| `character_single/` | one character art | `{"<stock stem>": {"gender": [...], "character": "<id>"}}` |
+| `character_duo/` | two character arts | `{"<stock stem>": {"gender": [...], "character_1": "<id>", "character_2": "<id>", "gender_1": "male"?}}` |
+
+**Character** directories hold configs only. Their backgrounds are the
+drawn-face stock images in `data/stock_images/` (the same art as `fru_single`
+and `fru_duo`), and the placement comes from the server with each art
+(`character_art[].geometry`: `crop_box` and `scene_size` in that stock image).
+`character` / `character_1` / `character_2` are the server registry's character
+ids; a visitor gets one art per character of their gender, including every duo
+figure, so either person of a pair can stand on either side. In a `mixed` duo
+scene `gender_1` names the gender figure 1 is drawn as, and the pair is swapped
+to match, as in `fru_duo`. Slides are written as `chr_scene_<stock stem>.jpg`.
 
 Both modes compose from these same four directories. Base mode uses the
 cutouts it downloads; diagnostic mode uses the cutouts in each person's
